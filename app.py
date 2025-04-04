@@ -16,7 +16,7 @@ CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', 'testsub01')
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 COOLDOWN_SECONDS = 120
 PREDICTION_DELAY = 130
-SHARES_REQUIRED = 1
+SHARES_REQUIRED = 5
 INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
 
 # Database configuration
@@ -233,12 +233,12 @@ def is_user_verified(user_id):
         if conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT verified_member FROM users WHERE user_id = %s
+                    SELECT is_member, verified_member FROM users WHERE user_id = %s
                 """, (user_id,))
                 result = cur.fetchone()
                 conn.close()
                 if result:
-                    return result[0]
+                    return result[0] and result[1]  # Both must be True
     except Exception as e:
         logger.error(f"Error checking user verification: {e}")
     return False
@@ -269,8 +269,8 @@ def send_welcome(message):
             f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
         )
         
-        # Check if user is already verified
-        if is_user_verified(user_id):
+        # Check if user is fully verified (both membership and shares)
+        if is_user_verified(user_id) and has_shared_enough(user_id):
             markup = telebot.types.InlineKeyboardMarkup()
             markup.add(telebot.types.InlineKeyboardButton(f"{ROCKET} Generate Prediction", callback_data="get_prediction"))
             bot.send_message(user_id, welcome_msg, reply_markup=markup, parse_mode="Markdown")
@@ -299,11 +299,12 @@ def send_welcome(message):
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             return
         
-        # If they passed both checks, mark as verified
-        mark_user_verified(user_id)
-        markup = telebot.types.InlineKeyboardMarkup()
-        markup.add(telebot.types.InlineKeyboardButton(f"{ROCKET} Generate Prediction", callback_data="get_prediction"))
-        bot.send_message(user_id, welcome_msg, reply_markup=markup, parse_mode="Markdown")
+        # If they passed both checks but aren't marked as verified
+        if is_member(user_id) and has_shared_enough(user_id):
+            mark_user_verified(user_id)
+            markup = telebot.types.InlineKeyboardMarkup()
+            markup.add(telebot.types.InlineKeyboardButton(f"{ROCKET} Generate Prediction", callback_data="get_prediction"))
+            bot.send_message(user_id, welcome_msg, reply_markup=markup, parse_mode="Markdown")
         
     except Exception as e:
         logger.error(f"Welcome error: {e}")
@@ -313,9 +314,14 @@ def check_membership(call):
     try:
         user_id = call.message.chat.id
         if is_member(user_id):
-            mark_user_verified(user_id)
-            bot.answer_callback_query(call.id, "✅ Verified!")
-            send_welcome(call.message)
+            if has_shared_enough(user_id):
+                mark_user_verified(user_id)
+                bot.answer_callback_query(call.id, "✅ Fully verified! You can now get predictions.")
+                send_welcome(call.message)
+            else:
+                shares_needed = SHARES_REQUIRED - count_valid_shares(user_id)
+                bot.answer_callback_query(call.id, f"✅ Membership verified! Need {shares_needed} more referrals.", show_alert=True)
+                send_welcome(call.message)
         else:
             bot.answer_callback_query(call.id, "❌ Join channel first!", show_alert=True)
     except Exception as e:
@@ -325,8 +331,13 @@ def check_membership(call):
 def verify_shares(call):
     try:
         user_id = call.message.chat.id
+        if not is_member(user_id):
+            bot.answer_callback_query(call.id, "❌ Verify membership first!", show_alert=True)
+            return
+            
         if has_shared_enough(user_id):
-            bot.answer_callback_query(call.id, "✅ Sharing verified!")
+            mark_user_verified(user_id)
+            bot.answer_callback_query(call.id, "✅ Fully verified! You can now get predictions.")
             send_welcome(call.message)
         else:
             needed = SHARES_REQUIRED - count_valid_shares(user_id)
@@ -339,11 +350,11 @@ def handle_prediction(call):
     try:
         user_id = call.message.chat.id
         
-        if not is_member(user_id) and not is_user_verified(user_id):
-            bot.answer_callback_query(call.id, "❌ Channel membership required!", show_alert=True)
+        if not is_user_verified(user_id):
+            bot.answer_callback_query(call.id, "❌ Complete verification first!", show_alert=True)
             return
             
-        if not has_shared_enough(user_id) and not is_user_verified(user_id):
+        if not has_shared_enough(user_id):
             bot.answer_callback_query(call.id, "❌ Complete sharing first!", show_alert=True)
             return
             
