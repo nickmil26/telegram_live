@@ -16,7 +16,7 @@ CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', 'testsub01')
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 COOLDOWN_SECONDS = 120
 PREDICTION_DELAY = 130
-SHARES_REQUIRED = 5
+SHARES_REQUIRED = 1
 INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
 
 # Database configuration
