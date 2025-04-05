@@ -32,7 +32,7 @@ PREDICTION_DELAY = int(os.getenv('PREDICTION_DELAY', 130))
 SHARES_REQUIRED = int(os.getenv('SHARES_REQUIRED', 1))
 INDIAN_TIMEZONE = pytz.timezone('Asia/Kolkata')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-SERVER_URL = os.getenv('SERVER_URL', 'https://your-render-app.onrender.com')
+SERVER_URL = os.getenv('SERVER_URL', 'https://telegram-live.onrender.com')
 WEBHOOK_PORT = int(os.getenv('PORT', 8080))
 UPTIME_ROBOT_URL = os.getenv('UPTIME_ROBOT_URL')  # For keeping the bot awake
 
