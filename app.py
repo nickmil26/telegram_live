@@ -107,7 +107,7 @@ def initialize_database():
         """
         CREATE TABLE IF NOT EXISTS live_requests (
             id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL UNIQUE,  # Added UNIQUE constraint here
+            user_id BIGINT NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
