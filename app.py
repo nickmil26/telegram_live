@@ -366,7 +366,7 @@ def get_admin_markup():
         telebot.types.InlineKeyboardButton("🧹 Clear Requests", callback_data="clear_requests")
     )
     markup.row(
-        telebot.types.InlineKeyboardButton("📤 Send Prediction", callback_data="send_prediction"),
+        telebot.types.InlineKeyboardButton("📤 Send Message", callback_data="send_prediction"),
         telebot.types.InlineKeyboardButton("👥 Check Users", callback_data="check_users")
     )
     return markup
@@ -576,9 +576,239 @@ def request_live_prediction(call):
         logger.error(f"Live prediction request error: {e}")
 
 
+  # ================= ADMIN MESSAGE HANDLERS =================
 
+@bot.callback_query_handler(func=lambda call: call.data == "send_prediction")
+def send_prediction_menu(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.row(
+            telebot.types.InlineKeyboardButton("📝 Text Message", callback_data="send_text"),
+            telebot.types.InlineKeyboardButton("🖼️ Image", callback_data="send_image")
+        )
+        markup.row(
+            telebot.types.InlineKeyboardButton("🎵 Voice Message", callback_data="send_voice"),
+            telebot.types.InlineKeyboardButton("😄 Sticker", callback_data="send_sticker")
+        )
+        markup.row(
+            telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="back_to_admin")
+        )
+        
+        bot.edit_message_text(
+            "📤 Select message type to send:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Send prediction menu error: {e}")
 
-@bot.callback_query_handler(func=lambda call: call.data in ["check_requests", "clear_requests", "send_prediction", "check_users"])
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_admin")
+def back_to_admin(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        bot.edit_message_text(
+            "🛠 *Admin Panel* 🛠",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=get_admin_markup(),
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Back to admin error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_text")
+def ask_for_text_message(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        msg = bot.send_message(user_id, "✍️ Enter the text message to send to verified users:")
+        bot.register_next_step_handler(msg, process_text_message)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Ask for text message error: {e}")
+
+def process_text_message(message):
+    try:
+        if not is_admin(message.chat.id):
+            return
+            
+        text_content = message.text
+        verified_users = [user['user_id'] for user in get_users() 
+                         if is_member(int(user['user_id'])) and has_shared_enough(int(user['user_id']))]
+        
+        success = 0
+        failures = 0
+        for user_id in verified_users:
+            try:
+                bot.send_message(user_id, f"📡 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send text to {user_id}: {e}")
+                failures += 1
+                
+        bot.send_message(message.chat.id, f"✅ Text sent to {success} users\n❌ Failed for {failures} users")
+        
+    except Exception as e:
+        logger.error(f"Text message processing error: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_image")
+def ask_for_image(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        msg = bot.send_message(user_id, "🖼️ Send the image you want to broadcast (send as photo):")
+        bot.register_next_step_handler(msg, process_image_message)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Ask for image error: {e}")
+
+def process_image_message(message):
+    try:
+        if not is_admin(message.chat.id):
+            return
+            
+        if not message.photo:
+            bot.send_message(message.chat.id, "❌ Please send an image as a photo.")
+            return
+            
+        # Get the highest resolution photo
+        photo = message.photo[-1].file_id
+        caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
+        
+        verified_users = [user['user_id'] for user in get_users() 
+                         if is_member(int(user['user_id'])) and has_shared_enough(int(user['user_id']))]
+        
+        success = 0
+        failures = 0
+        for user_id in verified_users:
+            try:
+                bot.send_photo(user_id, photo, caption=caption, parse_mode="Markdown")
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send image to {user_id}: {e}")
+                failures += 1
+                
+        bot.send_message(message.chat.id, f"✅ Image sent to {success} users\n❌ Failed for {failures} users")
+        
+    except Exception as e:
+        logger.error(f"Image processing error: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_voice")
+def ask_for_voice(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        msg = bot.send_message(user_id, "🎤 Send the voice message you want to broadcast:")
+        bot.register_next_step_handler(msg, process_voice_message)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Ask for voice error: {e}")
+
+def process_voice_message(message):
+    try:
+        if not is_admin(message.chat.id):
+            return
+            
+        if not message.voice:
+            bot.send_message(message.chat.id, "❌ Please send a voice message.")
+            return
+            
+        voice = message.voice.file_id
+        caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
+        
+        verified_users = [user['user_id'] for user in get_users() 
+                         if is_member(int(user['user_id'])) and has_shared_enough(int(user['user_id']))]
+        
+        success = 0
+        failures = 0
+        for user_id in verified_users:
+            try:
+                bot.send_voice(user_id, voice, caption=caption, parse_mode="Markdown")
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send voice to {user_id}: {e}")
+                failures += 1
+                
+        bot.send_message(message.chat.id, f"✅ Voice message sent to {success} users\n❌ Failed for {failures} users")
+        
+    except Exception as e:
+        logger.error(f"Voice processing error: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "send_sticker")
+def ask_for_sticker(call):
+    try:
+        user_id = call.message.chat.id
+        if not is_admin(user_id):
+            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
+            return
+            
+        msg = bot.send_message(user_id, "😄 Send the sticker you want to broadcast:")
+        bot.register_next_step_handler(msg, process_sticker_message)
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Ask for sticker error: {e}")
+
+def process_sticker_message(message):
+    try:
+        if not is_admin(message.chat.id):
+            return
+            
+        if not message.sticker:
+            bot.send_message(message.chat.id, "❌ Please send a sticker.")
+            return
+            
+        sticker = message.sticker.file_id
+        
+        verified_users = [user['user_id'] for user in get_users() 
+                         if is_member(int(user['user_id'])) and has_shared_enough(int(user['user_id']))]
+        
+        success = 0
+        failures = 0
+        for user_id in verified_users:
+            try:
+                bot.send_sticker(user_id, sticker)
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send sticker to {user_id}: {e}")
+                failures += 1
+                
+        bot.send_message(message.chat.id, f"✅ Sticker sent to {success} users\n❌ Failed for {failures} users")
+        
+    except Exception as e:
+        logger.error(f"Sticker processing error: {e}")
+        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data in ["check_requests", "clear_requests", "check_users"])
 def admin_actions(call):
     try:
         user_id = call.message.chat.id
@@ -604,11 +834,6 @@ def admin_actions(call):
             else:
                 bot.answer_callback_query(call.id, "❌ Failed to clear requests!")
                 
-        elif call.data == "send_prediction":
-            msg = bot.send_message(user_id, "✍️ Enter the prediction message to send to verified users:")
-            bot.register_next_step_handler(msg, process_prediction_message)
-            bot.answer_callback_query(call.id)
-            
         elif call.data == "check_users":
             users = get_users()
             if not users:
@@ -618,7 +843,7 @@ def admin_actions(call):
                 msg += "\n".join(
                     f"{idx+1}. ID: {user['user_id']} | @{user['username'] if user['username'] else ''} {user['first_name'] or ''} {user['last_name'] or ''}"
                     for idx, user in enumerate(users[:10])
-                    )
+                )
                 if len(users) > 10:
                     msg += f"\n\n...and {len(users)-10} more"
             bot.send_message(user_id, msg)
@@ -627,30 +852,7 @@ def admin_actions(call):
     except Exception as e:
         logger.error(f"Admin action error: {e}")
 
-def process_prediction_message(message):
-    try:
-        if not is_admin(message.chat.id):
-            return
-            
-        prediction_msg = message.text
-        verified_users = [user['user_id'] for user in get_users() 
-                         if is_member(int(user['user_id'])) and has_shared_enough(int(user['user_id']))]
-        
-        success = 0
-        failures = 0
-        for user_id in verified_users:
-            try:
-                bot.send_message(user_id, f"📡 *LIVE PREDICTION*\n\n{prediction_msg}", parse_mode="Markdown")
-                success += 1
-            except Exception as e:
-                logger.error(f"Failed to send to {user_id}: {e}")
-                failures += 1
-                
-        bot.send_message(message.chat.id, f"✅ Message sent to {success} users\n❌ Failed for {failures} users")
-        
-    except Exception as e:
-        logger.error(f"Prediction message processing error: {e}")
-        bot.send_message(message.chat.id, f"❌ Error: {e}")
+
 
 # ================= WEBHOOK SETUP =================
 @app.route('/' + BOT_TOKEN, methods=['POST'])
