@@ -106,10 +106,10 @@ def initialize_database():
         """,
         """
         CREATE TABLE IF NOT EXISTS live_requests (
-    id SERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL UNIQUE,  # Added UNIQUE constraint here
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         """,
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -133,6 +133,7 @@ def initialize_database():
         if conn:
             conn.close()
 
+
 def get_admins():
     """Get list of admin user IDs"""
     try:
@@ -154,19 +155,23 @@ def is_admin(user_id):
     return str(user_id) in get_admins()
 
 def save_live_request(user_id):
-    """Save a live prediction request (only if not already exists)"""
+    """Save a live prediction request"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO live_requests (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
+            """
+            INSERT INTO live_requests (user_id) 
+            VALUES (%s)
+            ON CONFLICT (user_id) DO NOTHING
+            RETURNING id
+            """,
             (user_id,)
         )
         conn.commit()
-        # Check if a row was actually inserted
-        if cur.rowcount > 0:
-            return True
-        return False  # Means the user already had a request
+        # If a row was inserted, cur.fetchone() will return the id
+        # If there was a conflict, it will return None
+        return cur.fetchone() is not None
     except Exception as e:
         logger.error(f"Error saving live request: {e}")
         return False
@@ -556,23 +561,11 @@ def request_live_prediction(call):
             bot.answer_callback_query(call.id, "❌ Complete sharing first!", show_alert=True)
             return
             
-        # Check if user already has a pending request
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM live_requests WHERE user_id = %s", (user_id,))
-            if cur.fetchone():
-                bot.answer_callback_query(call.id, "❌ You already have a pending request!", show_alert=True)
-                return
-        finally:
-            if conn:
-                conn.close()
-            
         if save_live_request(user_id):
             total_requests = count_live_requests()
             bot.answer_callback_query(
                 call.id, 
-                f"✅ Your request sent, admin will notified\n{total_requests} members have requested", 
+                f"✅ Your request sent, admin will be notified\n{total_requests} members have requested", 
                 show_alert=True
             )
             notify_admins(f"👋 Hello admin! Live prediction request received from user {user_id}")
@@ -581,6 +574,9 @@ def request_live_prediction(call):
             
     except Exception as e:
         logger.error(f"Live prediction request error: {e}")
+
+
+
 
 @bot.callback_query_handler(func=lambda call: call.data in ["check_requests", "clear_requests", "send_prediction", "check_users"])
 def admin_actions(call):
