@@ -106,10 +106,10 @@ def initialize_database():
         """,
         """
         CREATE TABLE IF NOT EXISTS live_requests (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL UNIQUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
         """,
         """
         CREATE TABLE IF NOT EXISTS admins (
@@ -154,16 +154,19 @@ def is_admin(user_id):
     return str(user_id) in get_admins()
 
 def save_live_request(user_id):
-    """Save a live prediction request"""
+    """Save a live prediction request (only if not already exists)"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO live_requests (user_id) VALUES (%s)",
+            "INSERT INTO live_requests (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
             (user_id,)
         )
         conn.commit()
-        return True
+        # Check if a row was actually inserted
+        if cur.rowcount > 0:
+            return True
+        return False  # Means the user already had a request
     except Exception as e:
         logger.error(f"Error saving live request: {e}")
         return False
@@ -553,6 +556,18 @@ def request_live_prediction(call):
             bot.answer_callback_query(call.id, "❌ Complete sharing first!", show_alert=True)
             return
             
+        # Check if user already has a pending request
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM live_requests WHERE user_id = %s", (user_id,))
+            if cur.fetchone():
+                bot.answer_callback_query(call.id, "❌ You already have a pending request!", show_alert=True)
+                return
+        finally:
+            if conn:
+                conn.close()
+            
         if save_live_request(user_id):
             total_requests = count_live_requests()
             bot.answer_callback_query(
@@ -562,7 +577,7 @@ def request_live_prediction(call):
             )
             notify_admins(f"👋 Hello admin! Live prediction request received from user {user_id}")
         else:
-            bot.answer_callback_query(call.id, "❌ Failed to save request. Try again.", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ You already have a pending request!", show_alert=True)
             
     except Exception as e:
         logger.error(f"Live prediction request error: {e}")
