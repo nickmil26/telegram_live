@@ -8,9 +8,9 @@ from threading import Thread
 from flask import Flask, request, jsonify
 import telebot
 import psycopg2
-from psycopg2 import sql, pool
+from psycopg2 import sql
 from urllib.parse import urlparse
-from functools import lru_cache
+from contextlib import contextmanager
 
 # ================= INITIAL SETUP =================
 logging.basicConfig(
@@ -55,76 +55,57 @@ app = Flask(__name__)
 # Trackers
 first_time_users = set()
 cooldowns = {}
+membership_cache = {}  # Cache for membership status to reduce DB queries
+referral_cache = {}    # Cache for referral counts
 
-# ================= DATABASE CONNECTION POOL =================
-class DatabaseConnection:
-    _pool = None
-
-    @classmethod
-    def initialize_pool(cls):
-        try:
-            db_url = os.getenv('DATABASE_URL')
-            if db_url:
-                result = urlparse(db_url)
-                cls._pool = psycopg2.pool.SimpleConnectionPool(
-                    minconn=1,
-                    maxconn=10,
-                    database=result.path[1:],
-                    user=result.username,
-                    password=result.password,
-                    host=result.hostname,
-                    port=result.port
-                )
-            else:
-                # For local testing
-                cls._pool = psycopg2.pool.SimpleConnectionPool(
-                    minconn=1,
-                    maxconn=10,
-                    dbname=os.getenv('DB_NAME', 'telegram_bot'),
-                    user=os.getenv('DB_USER', 'postgres'),
-                    password=os.getenv('DB_PASSWORD', ''),
-                    host=os.getenv('DB_HOST', 'localhost')
-                )
-            logger.info("Database connection pool initialized")
-        except Exception as e:
-            logger.error(f"Database connection pool error: {e}")
-            raise
-
-    @classmethod
-    def get_connection(cls):
-        if cls._pool is None:
-            cls.initialize_pool()
-        return cls._pool.getconn()
-
-    @classmethod
-    def return_connection(cls, conn):
-        if cls._pool is not None and conn:
-            cls._pool.putconn(conn)
-
-    @classmethod
-    def close_all_connections(cls):
-        if cls._pool is not None:
-            cls._pool.closeall()
-            logger.info("All database connections closed")
-
-# Initialize connection pool
-DatabaseConnection.initialize_pool()
-
-# Database context manager for cleaner connection handling
-class DatabaseContext:
-    def __enter__(self):
-        self.conn = DatabaseConnection.get_connection()
-        return self.conn.cursor()
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is not None:
-            self.conn.rollback()
-            logger.error(f"Database error: {exc_val}")
+# ================= DATABASE UTILITIES =================
+@contextmanager
+def db_connection():
+    """Context manager for database connections to ensure proper cleanup"""
+    conn = None
+    try:
+        # Parse the database URL if using Render's internal database URL
+        db_url = os.getenv('DATABASE_URL')
+        if db_url:
+            result = urlparse(db_url)
+            conn = psycopg2.connect(
+                database=result.path[1:],
+                user=result.username,
+                password=result.password,
+                host=result.hostname,
+                port=result.port
+            )
         else:
-            self.conn.commit()
-        DatabaseConnection.return_connection(self.conn)
+            # For local testing
+            conn = psycopg2.connect(
+                dbname=os.getenv('DB_NAME', 'telegram_bot'),
+                user=os.getenv('DB_USER', 'postgres'),
+                password=os.getenv('DB_PASSWORD', ''),
+                host=os.getenv('DB_HOST', 'localhost')
+            )
+        yield conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
-# ================= DATABASE FUNCTIONS =================
+@contextmanager
+def db_cursor():
+    """Context manager for database cursor"""
+    with db_connection() as conn:
+        cur = conn.cursor()
+        try:
+            yield cur
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Database error: {e}")
+            raise
+        finally:
+            cur.close()
+
 def initialize_database():
     """Create necessary tables if they don't exist"""
     commands = (
@@ -134,9 +115,7 @@ def initialize_database():
             username VARCHAR(255),
             first_name VARCHAR(255),
             last_name VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_member BOOLEAN DEFAULT FALSE,
-            shares_count INTEGER DEFAULT 0
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
         """
@@ -145,16 +124,14 @@ def initialize_database():
             referrer_id BIGINT NOT NULL,
             referred_id BIGINT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(referrer_id, referred_id),
-            FOREIGN KEY (referrer_id) REFERENCES users(user_id) ON DELETE CASCADE
+            UNIQUE(referrer_id, referred_id)
         )
         """,
         """
         CREATE TABLE IF NOT EXISTS live_requests (
             id SERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
         """
@@ -162,143 +139,74 @@ def initialize_database():
             id SERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL UNIQUE
         )
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS idx_users_member ON users(is_member)
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS idx_users_shares ON users(shares_count)
         """
     )
     
-    with DatabaseContext() as cur:
-        for command in commands:
-            cur.execute(command)
+    try:
+        with db_cursor() as cur:
+            for command in commands:
+                cur.execute(command)
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization error: {e}")
+        raise
 
-@lru_cache(maxsize=128)
+# ================= CACHED DATABASE FUNCTIONS =================
 def get_admins():
-    """Get cached list of admin user IDs"""
-    with DatabaseContext() as cur:
-        cur.execute("SELECT user_id FROM admins")
-        return [str(row[0]) for row in cur.fetchall()]
+    """Get list of admin user IDs with caching"""
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT user_id FROM admins")
+            admins = [str(row[0]) for row in cur.fetchall()]
+            return admins
+    except Exception as e:
+        logger.error(f"Error getting admins: {e}")
+        return []
 
 def is_admin(user_id):
     """Check if user is admin"""
     return str(user_id) in get_admins()
 
-def update_user_membership(user_id, is_member_status):
-    """Update user's membership status"""
-    with DatabaseContext() as cur:
-        cur.execute(
-            "UPDATE users SET is_member = %s WHERE user_id = %s",
-            (is_member_status, user_id)
-        )
-
-def update_user_shares(user_id, shares_count):
-    """Update user's shares count"""
-    with DatabaseContext() as cur:
-        cur.execute(
-            "UPDATE users SET shares_count = %s WHERE user_id = %s",
-            (shares_count, user_id)
-        )
-
-def save_user_if_eligible(user_info):
-    """Save user to database only if they meet all requirements"""
-    user_id = user_info.id
+def is_member(user_id):
+    """Check if user is member of channel with caching"""
+    if user_id in membership_cache:
+        return membership_cache[user_id]
     
-    # First check membership status
-    is_member_status = is_member(user_id)
-    shares_count = count_user_referrals(user_id)
-    is_eligible = is_member_status and (SHARES_REQUIRED == 0 or shares_count >= SHARES_REQUIRED)
-    
-    with DatabaseContext() as cur:
-        # Check if user exists
-        cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
-        if cur.fetchone():
-            # Update existing user's status
-            cur.execute(
-                """
-                UPDATE users 
-                SET username = %s, first_name = %s, last_name = %s, 
-                    is_member = %s, shares_count = %s
-                WHERE user_id = %s
-                """,
-                (
-                    user_info.username, user_info.first_name, user_info.last_name,
-                    is_member_status, shares_count, user_id
-                )
-            )
-            return is_eligible
-        
-        # Only insert if eligible
-        if is_eligible:
-            cur.execute(
-                """
-                INSERT INTO users 
-                (user_id, username, first_name, last_name, is_member, shares_count)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    user_id, user_info.username, user_info.first_name, 
-                    user_info.last_name, is_member_status, shares_count
-                )
-            )
-            return True
-    return False
-
-def save_referral(referrer_id, referred_id):
-    """Save referral relationship if referrer exists"""
-    with DatabaseContext() as cur:
-        # Check if referrer exists
-        cur.execute("SELECT 1 FROM users WHERE user_id = %s", (referrer_id,))
-        if not cur.fetchone():
-            return False
-            
-        try:
-            cur.execute(
-                """
-                INSERT INTO referrals (referrer_id, referred_id)
-                VALUES (%s, %s)
-                ON CONFLICT (referrer_id, referred_id) DO NOTHING
-                RETURNING 1
-                """,
-                (referrer_id, referred_id)
-            )
-            if cur.fetchone():
-                # Update referrer's shares count
-                shares_count = count_user_referrals(referrer_id)
-                update_user_shares(referrer_id, shares_count)
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error saving referral: {e}")
-            return False
+    try:
+        member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
+        is_member = member.status in ["member", "administrator", "creator"]
+        membership_cache[user_id] = is_member  # Cache the result
+        return is_member
+    except Exception as e:
+        logger.error(f"Membership check error: {e}")
+        return False
 
 def count_user_referrals(user_id):
-    """Count how many referrals a user has"""
-    with DatabaseContext() as cur:
-        cur.execute(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s",
-            (user_id,)
-        )
-        return cur.fetchone()[0] or 0
+    """Count how many referrals a user has with caching"""
+    if user_id in referral_cache:
+        return referral_cache[user_id]
+    
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM referrals WHERE referrer_id = %s",
+                (user_id,)
+            )
+            count = cur.fetchone()[0]
+            referral_cache[user_id] = count  # Cache the result
+            return count
+    except Exception as e:
+        logger.error(f"Error counting referrals: {e}")
+        return 0
+
+def has_shared_enough(user_id):
+    """Check if user has enough referrals"""
+    return count_user_referrals(user_id) >= SHARES_REQUIRED
 
 def save_live_request(user_id):
-    """Save a live prediction request if user exists"""
-    with DatabaseContext() as cur:
-        # Check if user exists and is eligible
-        cur.execute(
-            """
-            SELECT 1 FROM users 
-            WHERE user_id = %s AND is_member = TRUE 
-            AND (shares_count >= %s OR %s = 0)
-            """,
-            (user_id, SHARES_REQUIRED, SHARES_REQUIRED)
-        )
-        if not cur.fetchone():
-            return False
-            
-        try:
+    """Save a live prediction request"""
+    try:
+        with db_cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO live_requests (user_id) 
@@ -308,63 +216,106 @@ def save_live_request(user_id):
                 """,
                 (user_id,)
             )
+            # If a row was inserted, cur.fetchone() will return the id
+            # If there was a conflict, it will return None
             return cur.fetchone() is not None
-        except Exception as e:
-            logger.error(f"Error saving live request: {e}")
-            return False
+    except Exception as e:
+        logger.error(f"Error saving live request: {e}")
+        return False
 
 def count_live_requests():
     """Count total live requests"""
-    with DatabaseContext() as cur:
-        cur.execute("SELECT COUNT(*) FROM live_requests")
-        return cur.fetchone()[0] or 0
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM live_requests")
+            return cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error counting live requests: {e}")
+        return 0
 
 def clear_live_requests():
     """Clear all live requests"""
-    with DatabaseContext() as cur:
-        cur.execute("TRUNCATE live_requests")
-        return True
+    try:
+        with db_cursor() as cur:
+            cur.execute("TRUNCATE live_requests")
+            return True
+    except Exception as e:
+        logger.error(f"Error clearing live requests: {e}")
+        return False
+
+def save_user_if_eligible(user_info):
+    """Save user to database only if they meet all requirements"""
+    user_id = user_info.id
+    
+    # Clear cache for this user since we're updating their status
+    membership_cache.pop(user_id, None)
+    referral_cache.pop(user_id, None)
+    
+    try:
+        with db_cursor() as cur:
+            # Check if user exists first
+            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            if cur.fetchone():
+                return True  # User already exists
+                
+            # Only save if they meet requirements
+            if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
+                cur.execute(
+                    """
+                    INSERT INTO users (user_id, username, first_name, last_name)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (user_info.id, user_info.username, user_info.first_name, user_info.last_name)
+                )
+                return True
+            return False
+    except Exception as e:
+        logger.error(f"Error saving eligible user: {e}")
+        return False
+
+def save_referral(referrer_id, referred_id):
+    """Save referral relationship and clear cache"""
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO referrals (referrer_id, referred_id)
+                VALUES (%s, %s)
+                ON CONFLICT (referrer_id, referred_id) DO NOTHING
+                """,
+                (referrer_id, referred_id)
+            )
+            # Clear referral cache for referrer since count may have changed
+            referral_cache.pop(referrer_id, None)
+            return True
+    except Exception as e:
+        logger.error(f"Error saving referral: {e}")
+        return False
 
 def get_live_requests():
     """Get all live prediction requests"""
-    with DatabaseContext() as cur:
-        cur.execute("SELECT user_id FROM live_requests")
-        return [str(row[0]) for row in cur.fetchall()]
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT user_id FROM live_requests")
+            return [str(row[0]) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting live requests: {e}")
+        return []
 
 def get_users():
     """Get all users from database"""
-    with DatabaseContext() as cur:
-        cur.execute("SELECT user_id, username, first_name, last_name FROM users")
-        return [
-            {
+    try:
+        with db_cursor() as cur:
+            cur.execute("SELECT user_id, username, first_name, last_name FROM users")
+            return [{
                 'user_id': str(row[0]),
                 'username': row[1],
                 'first_name': row[2],
                 'last_name': row[3]
-            }
-            for row in cur.fetchall()
-        ]
-
-def get_eligible_users():
-    """Get users who are members and have enough shares"""
-    with DatabaseContext() as cur:
-        cur.execute(
-            """
-            SELECT user_id, username, first_name, last_name 
-            FROM users 
-            WHERE is_member = TRUE AND (shares_count >= %s OR %s = 0)
-            """,
-            (SHARES_REQUIRED, SHARES_REQUIRED)
-        )
-        return [
-            {
-                'user_id': str(row[0]),
-                'username': row[1],
-                'first_name': row[2],
-                'last_name': row[3]
-            }
-            for row in cur.fetchall()
-        ]
+            } for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting users: {e}")
+        return []
 
 # ================= UTILITY FUNCTIONS =================
 def get_indian_time():
@@ -374,28 +325,6 @@ def get_indian_time():
 def format_time(dt):
     """Format time as HH:MM"""
     return dt.strftime("%H:%M")
-
-def is_member(user_id):
-    """Check if user is member of channel with caching"""
-    try:
-        member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        status = member.status in ["member", "administrator", "creator"]
-        # Update database with current membership status
-        update_user_membership(user_id, status)
-        return status
-    except Exception as e:
-        logger.error(f"Membership check error: {e}")
-        return False
-
-def has_shared_enough(user_id):
-    """Check if user has enough referrals"""
-    with DatabaseContext() as cur:
-        cur.execute(
-            "SELECT shares_count >= %s OR %s = 0 FROM users WHERE user_id = %s",
-            (SHARES_REQUIRED, SHARES_REQUIRED, user_id)
-        )
-        result = cur.fetchone()
-        return result[0] if result else False
 
 def generate_prediction():
     """Generate a random prediction"""
@@ -440,8 +369,7 @@ def get_admin_markup():
 
 def notify_admins(message):
     """Notify all admins"""
-    admin_ids = get_admins()
-    for admin_id in admin_ids:
+    for admin_id in get_admins():
         try:
             bot.send_message(admin_id, message)
         except Exception as e:
@@ -464,31 +392,16 @@ def ping_uptime_robot():
         except Exception as e:
             logger.error(f"Error pinging UptimeRobot: {e}")
 
-def batch_send_messages(user_ids, send_func, *args, **kwargs):
-    """Batch send messages to users with error handling"""
-    success = 0
-    failures = 0
-    batch_size = 30  # Telegram's rate limit is about 30 messages per second
-    
-    for i in range(0, len(user_ids), batch_size):
-        batch = user_ids[i:i + batch_size]
-        for user_id in batch:
-            try:
-                send_func(user_id, *args, **kwargs)
-                success += 1
-            except Exception as e:
-                logger.error(f"Failed to send to {user_id}: {e}")
-                failures += 1
-        time.sleep(1)  # Rate limiting
-    
-    return success, failures
-
 # ================= BOT HANDLERS =================
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     try:
         user_id = message.chat.id
         user_info = message.from_user
+        
+        # Clear cache for this user since we're checking fresh status
+        membership_cache.pop(user_id, None)
+        referral_cache.pop(user_id, None)
         
         # Process referral only if user joined channel
         if len(message.text.split()) > 1 and is_member(user_id):
@@ -501,8 +414,8 @@ def send_welcome(message):
             except Exception as e:
                 logger.error(f"Referral processing error: {e}")
 
-        # Save/update user with current status
-        is_eligible = save_user_if_eligible(user_info)
+        # Save user only if eligible
+        save_user_if_eligible(user_info)
         
         welcome_msg = (
             f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
@@ -511,23 +424,9 @@ def send_welcome(message):
             f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
         )
         
-        if is_member(user_id):
-            if has_shared_enough(user_id):
-                bot.send_message(user_id, welcome_msg, reply_markup=get_main_markup(user_id), parse_mode="Markdown")
-            else:
-                shares_count = count_user_referrals(user_id)
-                share_msg = (
-                    f"{LOCK} *SHARE REQUIREMENT*\n\n"
-                    f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
-                    f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
-                    "How to refer:\n"
-                    "1. Click 'Share Bot' below\n"
-                    "2. Send to friends\n"
-                    "3. They must JOIN CHANNEL and START bot\n"
-                    "4. Verify after they join"
-                )
-                bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
-        else:
+        if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
+            bot.send_message(user_id, welcome_msg, reply_markup=get_main_markup(user_id), parse_mode="Markdown")
+        elif not is_member(user_id):
             markup = telebot.types.InlineKeyboardMarkup()
             markup.add(
                 telebot.types.InlineKeyboardButton("Join VIP Channel", url=f"https://t.me/{CHANNEL_USERNAME}"),
@@ -535,6 +434,19 @@ def send_welcome(message):
             )
             bot.send_message(user_id, f"{CROSS} *PREMIUM ACCESS REQUIRED*\n\nJoin @{CHANNEL_USERNAME} then verify.", 
                            reply_markup=markup, parse_mode="Markdown")
+        else:
+            shares_count = count_user_referrals(user_id)
+            share_msg = (
+                f"{LOCK} *SHARE REQUIREMENT*\n\n"
+                f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
+                f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
+                "How to refer:\n"
+                "1. Click 'Share Bot' below\n"
+                "2. Send to friends\n"
+                "3. They must JOIN CHANNEL and START bot\n"
+                "4. Verify after they join"
+            )
+            bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
     except Exception as e:
         logger.error(f"Welcome error: {e}")
@@ -555,6 +467,10 @@ def admin_panel(message):
 def check_membership(call):
     try:
         user_id = call.message.chat.id
+        # Clear cache to force fresh check
+        membership_cache.pop(user_id, None)
+        referral_cache.pop(user_id, None)
+        
         if is_member(user_id):
             if has_shared_enough(user_id):
                 bot.answer_callback_query(call.id, "✅ Fully verified! You can now get predictions.")
@@ -576,14 +492,19 @@ def check_membership(call):
 def verify_shares(call):
     try:
         user_id = call.message.chat.id
+        # Clear cache to force fresh check
+        membership_cache.pop(user_id, None)
+        referral_cache.pop(user_id, None)
+        
         if not is_member(user_id):
             bot.answer_callback_query(call.id, "❌ Join channel first, then verify!", show_alert=True)
             return
             
-        # Update user status
+        # Save user if they now meet requirements
+        if has_shared_enough(user_id):
+            save_user_if_eligible(call.from_user)
+            
         shares_count = count_user_referrals(user_id)
-        save_user_if_eligible(call.from_user)
-        
         if shares_count >= SHARES_REQUIRED:
             bot.answer_callback_query(call.id, "✅ Fully verified! You can now get predictions.")
             send_welcome(call.message)
@@ -745,13 +666,21 @@ def process_text_message(message):
             return
             
         text_content = message.text
-        verified_users = [user['user_id'] for user in get_eligible_users()]
+        verified_users = get_users()  # Get all users
         
-        success, failures = batch_send_messages(
-            verified_users,
-            lambda uid: bot.send_message(uid, f"📡 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
-        )
-        
+        success = 0
+        failures = 0
+        for user in verified_users:
+            user_id = int(user['user_id'])
+            try:
+                # Check membership and shares for each user before sending
+                if is_member(user_id) and has_shared_enough(user_id):
+                    bot.send_message(user_id, f"📡 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
+                    success += 1
+            except Exception as e:
+                logger.error(f"Failed to send text to {user_id}: {e}")
+                failures += 1
+                
         bot.send_message(message.chat.id, f"✅ Text sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
@@ -782,15 +711,24 @@ def process_image_message(message):
             bot.send_message(message.chat.id, "❌ Please send an image as a photo.")
             return
             
+        # Get the highest resolution photo
         photo = message.photo[-1].file_id
         caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
-        verified_users = [user['user_id'] for user in get_eligible_users()]
         
-        success, failures = batch_send_messages(
-            verified_users,
-            lambda uid: bot.send_photo(uid, photo, caption=caption, parse_mode="Markdown")
-        )
+        verified_users = get_users()
         
+        success = 0
+        failures = 0
+        for user in verified_users:
+            user_id = int(user['user_id'])
+            try:
+                if is_member(user_id) and has_shared_enough(user_id):
+                    bot.send_photo(user_id, photo, caption=caption, parse_mode="Markdown")
+                    success += 1
+            except Exception as e:
+                logger.error(f"Failed to send image to {user_id}: {e}")
+                failures += 1
+                
         bot.send_message(message.chat.id, f"✅ Image sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
@@ -823,13 +761,21 @@ def process_voice_message(message):
             
         voice = message.voice.file_id
         caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
-        verified_users = [user['user_id'] for user in get_eligible_users()]
         
-        success, failures = batch_send_messages(
-            verified_users,
-            lambda uid: bot.send_voice(uid, voice, caption=caption, parse_mode="Markdown")
-        )
+        verified_users = get_users()
         
+        success = 0
+        failures = 0
+        for user in verified_users:
+            user_id = int(user['user_id'])
+            try:
+                if is_member(user_id) and has_shared_enough(user_id):
+                    bot.send_voice(user_id, voice, caption=caption, parse_mode="Markdown")
+                    success += 1
+            except Exception as e:
+                logger.error(f"Failed to send voice to {user_id}: {e}")
+                failures += 1
+                
         bot.send_message(message.chat.id, f"✅ Voice message sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
@@ -861,13 +807,21 @@ def process_sticker_message(message):
             return
             
         sticker = message.sticker.file_id
-        verified_users = [user['user_id'] for user in get_eligible_users()]
         
-        success, failures = batch_send_messages(
-            verified_users,
-            lambda uid: bot.send_sticker(uid, sticker)
-        )
+        verified_users = get_users()
         
+        success = 0
+        failures = 0
+        for user in verified_users:
+            user_id = int(user['user_id'])
+            try:
+                if is_member(user_id) and has_shared_enough(user_id):
+                    bot.send_sticker(user_id, sticker)
+                    success += 1
+            except Exception as e:
+                logger.error(f"Failed to send sticker to {user_id}: {e}")
+                failures += 1
+                
         bot.send_message(message.chat.id, f"✅ Sticker sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
@@ -957,6 +911,3 @@ if __name__ == '__main__':
     
     # Start Flask server
     app.run(host='0.0.0.0', port=WEBHOOK_PORT)
-    
-    # Clean up on exit
-    DatabaseConnection.close_all_connections()
