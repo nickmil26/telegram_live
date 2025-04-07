@@ -210,22 +210,35 @@ def clear_live_requests():
             conn.close()
 
 def save_user(user_info):
-    """Save user data (only if not exists)"""
+    """Save user data (only if they meet requirements) - Updated version"""
+    return save_user_if_eligible(user_info)  # Reuse the new eligibility check
+
+def save_user_if_eligible(user_info):
+    """Save user to database only if they meet all requirements"""
+    user_id = user_info.id
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO users (user_id, username, first_name, last_name)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            """,
-            (user_info.id, user_info.username, user_info.first_name, user_info.last_name)
-        )
-        conn.commit()
-        return True
+        
+        # Check if user exists first
+        cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+        if cur.fetchone():
+            return True  # User already exists
+            
+        # Only save if they meet requirements
+        if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
+            cur.execute(
+                """
+                INSERT INTO users (user_id, username, first_name, last_name)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (user_info.id, user_info.username, user_info.first_name, user_info.last_name)
+            )
+            conn.commit()
+            return True
+        return False
     except Exception as e:
-        logger.error(f"Error saving user: {e}")
+        logger.error(f"Error saving eligible user: {e}")
         return False
     finally:
         if conn:
@@ -402,19 +415,21 @@ def send_welcome(message):
     try:
         user_id = message.chat.id
         user_info = message.from_user
-        save_user(user_info)
         
-        # Handle referral with safe conversion
-        if len(message.text.split()) > 1:
+        # Process referral only if user joined channel
+        if len(message.text.split()) > 1 and is_member(user_id):
             try:
                 referrer_str = message.text.split()[1]
                 referrer_id = safe_int_convert(referrer_str)
                 if referrer_id != 0 and referrer_id != user_id:
                     save_referral(referrer_id, user_id)
-                    logger.info(f"New referral: {referrer_id} -> {user_id}")
+                    logger.info(f"New verified referral: {referrer_id} -> {user_id} (channel member)")
             except Exception as e:
                 logger.error(f"Referral processing error: {e}")
 
+        # Save user only if eligible
+        save_user_if_eligible(user_info)
+        
         welcome_msg = (
             f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
             f"{DIAMOND} Use suggested assurance for risk management\n"
@@ -422,7 +437,7 @@ def send_welcome(message):
             f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
         )
         
-        if is_member(user_id) and has_shared_enough(user_id):
+        if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
             bot.send_message(user_id, welcome_msg, reply_markup=get_main_markup(user_id), parse_mode="Markdown")
         elif not is_member(user_id):
             markup = telebot.types.InlineKeyboardMarkup()
@@ -436,11 +451,12 @@ def send_welcome(message):
             shares_count = count_user_referrals(user_id)
             share_msg = (
                 f"{LOCK} *SHARE REQUIREMENT*\n\n"
-                f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} to unlock.\n"
-                f"Current: {shares_count}/{SHARES_REQUIRED}\n\n"
-                "1. Click 'Share Bot'\n"
+                f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
+                f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
+                "How to refer:\n"
+                "1. Click 'Share Bot' below\n"
                 "2. Send to friends\n"
-                "3. They must START the bot\n"
+                "3. They must JOIN CHANNEL and START bot\n"
                 "4. Verify after they join"
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
@@ -448,6 +464,7 @@ def send_welcome(message):
     except Exception as e:
         logger.error(f"Welcome error: {e}")
         bot.send_message(message.chat.id, "⚠️ An error occurred. Please try again.")
+
 
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
@@ -486,8 +503,12 @@ def verify_shares(call):
     try:
         user_id = call.message.chat.id
         if not is_member(user_id):
-            bot.answer_callback_query(call.id, "❌ Verify membership first!", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Join channel first, then verify!", show_alert=True)
             return
+            
+        # Save user if they now meet requirements
+        if has_shared_enough(user_id):
+            save_user_if_eligible(call.from_user)
             
         shares_count = count_user_referrals(user_id)
         if shares_count >= SHARES_REQUIRED:
@@ -495,12 +516,15 @@ def verify_shares(call):
             send_welcome(call.message)
         else:
             needed = SHARES_REQUIRED - shares_count
-            bot.answer_callback_query(call.id, f"❌ Need {needed} more referrals", show_alert=True)
+            bot.answer_callback_query(call.id, 
+                f"❌ Need {needed} more valid referrals (users who joined channel)", 
+                show_alert=True)
     except Exception as e:
         logger.error(f"Share verify error: {e}")
         bot.answer_callback_query(call.id, "⚠️ Error verifying shares. Please try again.", show_alert=True)
-
 @bot.callback_query_handler(func=lambda call: call.data == "get_prediction")
+
+
 def handle_prediction(call):
     try:
         user_id = call.message.chat.id
