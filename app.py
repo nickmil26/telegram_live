@@ -322,6 +322,28 @@ def get_users():
         return []
 
 # ================= UTILITY FUNCTIONS =================
+
+def send_batch_messages(bot, user_ids, send_func, *args, **kwargs):
+    """Send messages in batches to avoid rate limits"""
+    BATCH_SIZE = 30  # Telegram's limit is about 30 messages per second
+    delay_between_batches = 1  # 1 second delay between batches
+    
+    success = 0
+    failures = 0
+    
+    for i in range(0, len(user_ids), BATCH_SIZE):
+        batch = user_ids[i:i+BATCH_SIZE]
+        for user_id in batch:
+            try:
+                send_func(user_id, *args, **kwargs)
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send to {user_id}: {e}")
+                failures += 1
+        time.sleep(delay_between_batches)
+    
+    return success, failures
+
 def get_indian_time():
     """Get current time in Indian timezone"""
     return datetime.now(INDIAN_TIMEZONE)
@@ -681,20 +703,21 @@ def process_text_message(message):
             return
             
         text_content = message.text
-        verified_users = get_users()  # Get all users
+        verified_users = get_users()
         
-        success = 0
-        failures = 0
+        # Filter users who are eligible to receive messages
+        eligible_users = []
         for user in verified_users:
             user_id = int(user['user_id'])
-            try:
-                # Check membership and shares for each user before sending
-                if is_member(user_id) and has_shared_enough(user_id):
-                    bot.send_message(user_id, f"🟢 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
-                    success += 1
-            except Exception as e:
-                logger.error(f"Failed to send text to {user_id}: {e}")
-                failures += 1
+            if is_member(user_id) and has_shared_enough(user_id):
+                eligible_users.append(user_id)
+        
+        # Send in batches
+        success, failures = send_batch_messages(
+            bot,
+            eligible_users,
+            lambda uid: bot.send_message(uid, f"🟢 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
+        )
                 
         bot.send_message(message.chat.id, f"✅ Text sent to {success} users\n❌ Failed for {failures} users")
         
@@ -726,30 +749,28 @@ def process_image_message(message):
             bot.send_message(message.chat.id, "❌ Please send an image as a photo.")
             return
             
-        # Get the highest resolution photo
         photo = message.photo[-1].file_id
         caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
         
         verified_users = get_users()
         
-        success = 0
-        failures = 0
+        eligible_users = []
         for user in verified_users:
             user_id = int(user['user_id'])
-            try:
-                if is_member(user_id) and has_shared_enough(user_id):
-                    bot.send_photo(user_id, photo, caption=caption, parse_mode="Markdown")
-                    success += 1
-            except Exception as e:
-                logger.error(f"Failed to send image to {user_id}: {e}")
-                failures += 1
+            if is_member(user_id) and has_shared_enough(user_id):
+                eligible_users.append(user_id)
+        
+        success, failures = send_batch_messages(
+            bot,
+            eligible_users,
+            lambda uid: bot.send_photo(uid, photo, caption=caption, parse_mode="Markdown")
+        )
                 
         bot.send_message(message.chat.id, f"✅ Image sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
         logger.error(f"Image processing error: {e}")
         bot.send_message(message.chat.id, f"❌ Error: {e}")
-
 @bot.callback_query_handler(func=lambda call: call.data == "send_voice")
 def ask_for_voice(call):
     try:
@@ -779,17 +800,17 @@ def process_voice_message(message):
         
         verified_users = get_users()
         
-        success = 0
-        failures = 0
+        eligible_users = []
         for user in verified_users:
             user_id = int(user['user_id'])
-            try:
-                if is_member(user_id) and has_shared_enough(user_id):
-                    bot.send_voice(user_id, voice, caption=caption, parse_mode="Markdown")
-                    success += 1
-            except Exception as e:
-                logger.error(f"Failed to send voice to {user_id}: {e}")
-                failures += 1
+            if is_member(user_id) and has_shared_enough(user_id):
+                eligible_users.append(user_id)
+        
+        success, failures = send_batch_messages(
+            bot,
+            eligible_users,
+            lambda uid: bot.send_voice(uid, voice, caption=caption, parse_mode="Markdown")
+        )
                 
         bot.send_message(message.chat.id, f"✅ Voice message sent to {success} users\n❌ Failed for {failures} users")
         
@@ -825,24 +846,24 @@ def process_sticker_message(message):
         
         verified_users = get_users()
         
-        success = 0
-        failures = 0
+        eligible_users = []
         for user in verified_users:
             user_id = int(user['user_id'])
-            try:
-                if is_member(user_id) and has_shared_enough(user_id):
-                    bot.send_sticker(user_id, sticker)
-                    success += 1
-            except Exception as e:
-                logger.error(f"Failed to send sticker to {user_id}: {e}")
-                failures += 1
+            if is_member(user_id) and has_shared_enough(user_id):
+                eligible_users.append(user_id)
+        
+        success, failures = send_batch_messages(
+            bot,
+            eligible_users,
+            lambda uid: bot.send_sticker(uid, sticker)
+        )
                 
         bot.send_message(message.chat.id, f"✅ Sticker sent to {success} users\n❌ Failed for {failures} users")
         
     except Exception as e:
         logger.error(f"Sticker processing error: {e}")
         bot.send_message(message.chat.id, f"❌ Error: {e}")
-
+        
 @bot.callback_query_handler(func=lambda call: call.data in ["check_requests", "clear_requests", "check_users"])
 def admin_actions(call):
     try:
