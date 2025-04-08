@@ -690,7 +690,7 @@ def process_text_message(message):
             try:
                 # Check membership and shares for each user before sending
                 if is_member(user_id) and has_shared_enough(user_id):
-                    bot.send_message(user_id, f"📡 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
+                    bot.send_message(user_id, f"🟢 *LIVE PREDICTION*\n\n{text_content}", parse_mode="Markdown")
                     success += 1
             except Exception as e:
                 logger.error(f"Failed to send text to {user_id}: {e}")
