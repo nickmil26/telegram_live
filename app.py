@@ -391,12 +391,6 @@ def get_admin_markup():
         telebot.types.InlineKeyboardButton("📤 Send Message", callback_data="send_prediction"),
         telebot.types.InlineKeyboardButton("👥 Check Users", callback_data="check_users")
     )
-
-    markup.row(
-        telebot.types.InlineKeyboardButton("🌀 Reset Users to Start", callback_data="batch_reset_users")
-    )
-
-    
     return markup
 
 def notify_admins(message):
@@ -914,85 +908,6 @@ def admin_actions(call):
     except Exception as e:
         logger.error(f"Admin action error: {e}")
 
-# Add batch reset handler
-@bot.callback_query_handler(func=lambda call: call.data == "batch_reset_users")
-def batch_reset_users(call):
-    try:
-        user_id = call.message.chat.id
-        if not is_admin(user_id):
-            bot.answer_callback_query(call.id, "⛔ Unauthorized access!")
-            return
-
-        # Clear runtime states
-        global cooldowns, first_time_users, membership_cache, referral_cache
-        cooldowns = {}
-        first_time_users = set()
-        membership_cache = {}
-        referral_cache = {}
-
-        # Get all users from users table
-        with db_cursor() as cur:
-            cur.execute("SELECT user_id FROM users")
-            user_ids = [str(row[0]) for row in cur.fetchall()]
-
-        if not user_ids:
-            bot.answer_callback_query(call.id, "❌ No users found!", show_alert=True)
-            return
-
-        # Send progress message
-        progress_msg = bot.send_message(user_id, 
-                                     f"🌀 Resetting {len(user_ids)} users...\n"
-                                     f"0/{len(user_ids)} completed")
-
-        # Batch settings
-        BATCH_SIZE = 25  # Telegram allows ~30 messages/sec
-        DELAY_BETWEEN_BATCHES = 1  # 1 second delay
-        completed = 0
-        failed = 0
-
-        # Process in batches
-        for i in range(0, len(user_ids), BATCH_SIZE):
-            batch = user_ids[i:i+BATCH_SIZE]
-            
-            for uid in batch:
-                try:
-                    bot.send_message(uid, "The bot has been updated. Please click /start to continue.")
-                    completed += 1
-                except Exception as e:
-                    logger.error(f"Failed to reset user {uid}: {e}")
-                    failed += 1
-                    continue
-            
-            # Update progress
-            try:
-                bot.edit_message_text(
-                    f"🌀 Resetting {len(user_ids)} users...\n"
-                    f"{completed}/{len(user_ids)} completed\n"
-                    f"Failed: {failed}",
-                    chat_id=progress_msg.chat.id,
-                    message_id=progress_msg.message_id
-                )
-            except:
-                pass
-            
-            # Respect API limits
-            if i + BATCH_SIZE < len(user_ids):
-                time.sleep(DELAY_BETWEEN_BATCHES)
-
-        # Final update
-        bot.edit_message_text(
-            f"✅ Reset complete!\n"
-            f"Total: {len(user_ids)}\n"
-            f"Success: {completed}\n"
-            f"Failed: {failed}",
-            chat_id=progress_msg.chat.id,
-            message_id=progress_msg.message_id
-        )
-        bot.answer_callback_query(call.id)
-
-    except Exception as e:
-        logger.error(f"Batch reset error: {e}")
-        bot.answer_callback_query(call.id, "❌ Reset failed!", show_alert=True)
 # ================= WEBHOOK SETUP =================
 @app.route('/' + BOT_TOKEN, methods=['POST'])
 def webhook():
