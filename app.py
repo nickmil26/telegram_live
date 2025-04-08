@@ -408,26 +408,26 @@ def send_welcome(message):
         referral_cache.pop(user_id, None)
         
         # Process referral only if user joined channel AND is not already registered
-if len(message.text.split()) > 1 and is_member(user_id):
-    try:
-        referrer_str = message.text.split()[1]
-        referrer_id = safe_int_convert(referrer_str)
-        if referrer_id != 0 and referrer_id != user_id:
-            # Check if user is already registered
-            with db_cursor() as cur:
-                cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
-                if not cur.fetchone():  # Only proceed if user NOT in database
-                    if save_referral(referrer_id, user_id):
-                        logger.info(f"New verified referral: {referrer_id} -> {user_id} (new channel member)")
-                        # Clear caches
-                        referral_cache.pop(referrer_id, None)
-                        membership_cache.pop(user_id, None)
-                    else:
-                        logger.info(f"Referral already exists: {referrer_id} -> {user_id}")
-                else:
-                    logger.info(f"User {user_id} already registered - referral not counted")
-    except Exception as e:
-        logger.error(f"Referral processing error: {e}")
+        if len(message.text.split()) > 1 and is_member(user_id):
+            try:
+                referrer_str = message.text.split()[1]
+                referrer_id = safe_int_convert(referrer_str)
+                if referrer_id != 0 and referrer_id != user_id:
+                    # Check if user is already registered
+                    with db_cursor() as cur:
+                        cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+                        if not cur.fetchone():  # Only proceed if user NOT in database
+                            if save_referral(referrer_id, user_id):
+                                logger.info(f"New verified referral: {referrer_id} -> {user_id} (new channel member)")
+                                # Clear caches
+                                referral_cache.pop(referrer_id, None)
+                                membership_cache.pop(user_id, None)
+                            else:
+                                logger.info(f"Referral already exists: {referrer_id} -> {user_id}")
+                        else:
+                            logger.info(f"User {user_id} already registered - referral not counted")
+            except Exception as e:
+                logger.error(f"Referral processing error: {e}")
 
         # Save user only if eligible
         save_user_if_eligible(user_info)
@@ -466,7 +466,7 @@ if len(message.text.split()) > 1 and is_member(user_id):
     except Exception as e:
         logger.error(f"Welcome error: {e}")
         bot.send_message(message.chat.id, "⚠️ An error occurred. Please try again.")
-
+        
 @bot.message_handler(commands=['admin'])
 def admin_panel(message):
     try:
