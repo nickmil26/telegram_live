@@ -4,13 +4,64 @@ import time
 import pytz
 from datetime import datetime, timedelta
 import logging
-from threading import Thread
+from threading import Thread, Lock
 from flask import Flask, request, jsonify
 import telebot
 import psycopg2
-from psycopg2 import sql
+from psycopg2 import sql, pool
 from urllib.parse import urlparse
 from contextlib import contextmanager
+from collections import OrderedDict
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+
+# ================= ENHANCED CACHE IMPLEMENTATION =================
+class ExpiringCache:
+    """Thread-safe cache with expiration and size limits"""
+    def __init__(self, max_size=1000, ttl=300):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+        self.ttl = ttl  # seconds
+        self.lock = Lock()
+
+    def __setitem__(self, key, value):
+        with self.lock:
+            self.cache[key] = (time.time(), value)
+            self._cleanup()
+
+    def __getitem__(self, key):
+        with self.lock:
+            timestamp, value = self.cache[key]
+            if time.time() - timestamp > self.ttl:
+                del self.cache[key]
+                raise KeyError("Expired")
+            return value
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def pop(self, key, default=None):
+        with self.lock:
+            try:
+                timestamp, value = self.cache.pop(key)
+                if time.time() - timestamp > self.ttl:
+                    return default
+                return value
+            except KeyError:
+                return default
+
+    def _cleanup(self):
+        now = time.time()
+        # Remove expired items
+        expired_keys = [k for k, (ts, _) in self.cache.items() if now - ts > self.ttl]
+        for key in expired_keys:
+            del self.cache[key]
+        # Enforce max size
+        while len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)
 
 # ================= INITIAL SETUP =================
 logging.basicConfig(
@@ -52,23 +103,25 @@ ROCKET_STICKER_ID = "CAACAgUAAxkBAAEL3xRmEeX3xQABHYYYr4YH1LQhUe3VdW8AAp4LAAIWjvl
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# Trackers
+# ================= ENHANCED TRACKERS =================
 first_time_users = set()
 cooldowns = {}
-membership_cache = {}  # Cache for membership status to reduce DB queries
-referral_cache = {}    # Cache for referral counts
+membership_cache = ExpiringCache(max_size=5000, ttl=600)  # 10 minute TTL
+referral_cache = ExpiringCache(max_size=5000, ttl=600)    # 10 minute TTL
+cooldown_lock = Lock()  # For thread-safe cooldown access
 
 # ================= DATABASE UTILITIES =================
-@contextmanager
-def db_connection():
-    """Context manager for database connections to ensure proper cleanup"""
-    conn = None
+db_pool = None
+
+def init_db_pool():
+    """Initialize the database connection pool"""
+    global db_pool
     try:
-        # Parse the database URL if using Render's internal database URL
         db_url = os.getenv('DATABASE_URL')
         if db_url:
             result = urlparse(db_url)
-            conn = psycopg2.connect(
+            db_pool = psycopg2.pool.SimpleConnectionPool(
+                1, 20,  # min 1, max 20 connections
                 database=result.path[1:],
                 user=result.username,
                 password=result.password,
@@ -76,24 +129,35 @@ def db_connection():
                 port=result.port
             )
         else:
-            # For local testing
-            conn = psycopg2.connect(
+            db_pool = psycopg2.pool.SimpleConnectionPool(
+                1, 20,
                 dbname=os.getenv('DB_NAME', 'telegram_bot'),
                 user=os.getenv('DB_USER', 'postgres'),
                 password=os.getenv('DB_PASSWORD', ''),
                 host=os.getenv('DB_HOST', 'localhost')
             )
+        logger.info("Database connection pool initialized")
+    except Exception as e:
+        logger.error(f"Database pool initialization error: {e}")
+        raise
+
+@contextmanager
+def db_connection():
+    """Get connection from pool"""
+    conn = None
+    try:
+        conn = db_pool.getconn()
         yield conn
     except Exception as e:
         logger.error(f"Database connection error: {e}")
         raise
     finally:
         if conn:
-            conn.close()
+            db_pool.putconn(conn)
 
 @contextmanager
 def db_cursor():
-    """Context manager for database cursor"""
+    """Get cursor from connection pool"""
     with db_connection() as conn:
         cur = conn.cursor()
         try:
@@ -150,7 +214,17 @@ def initialize_database():
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
         raise
-
+        
+        
+# ================= TELEGRAM API RETRY DECORATOR =================
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def safe_telegram_call(func, *args, **kwargs):
+    """Wrapper for Telegram API calls with retry logic"""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.warning(f"Telegram API call failed (attempt {safe_telegram_call.retry.statistics['attempt_number']}): {e}")
+        raise
 # ================= CACHED DATABASE FUNCTIONS =================
 def get_admins():
     """Get list of admin user IDs with caching"""
@@ -168,14 +242,15 @@ def is_admin(user_id):
     return str(user_id) in get_admins()
 
 def is_member(user_id):
-    """Check if user is member of channel with caching"""
-    if user_id in membership_cache:
-        return membership_cache[user_id]
+    """Check if user is member of channel with caching and retry"""
+    cached = membership_cache.get(user_id)
+    if cached is not None:
+        return cached
     
     try:
-        member = bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
+        member = safe_telegram_call(bot.get_chat_member, f"@{CHANNEL_USERNAME}", user_id)
         is_member = member.status in ["member", "administrator", "creator"]
-        membership_cache[user_id] = is_member  # Cache the result
+        membership_cache[user_id] = is_member
         return is_member
     except Exception as e:
         logger.error(f"Membership check error: {e}")
@@ -376,7 +451,7 @@ def get_main_markup(user_id):
     if is_member(user_id) and has_shared_enough(user_id):
         markup.row(
             telebot.types.InlineKeyboardButton(f"{ROCKET} Generate Prediction", callback_data="get_prediction"),
-            telebot.types.InlineKeyboardButton(f"🔴 Request Live Prediction", callback_data="request_live")
+            telebot.types.InlineKeyboardButton(f"📡 Request Live Prediction", callback_data="request_live")
         )
     return markup
 
@@ -456,13 +531,9 @@ def send_welcome(message):
         
         welcome_msg = (
             f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
-            f"{DIAMOND} Use suggested assurance for risk management\n\n"
+            f"{DIAMOND} Use suggested assurance for risk management\n"
             f"{DIAMOND} Follow cooldown periods\n\n"
-            f"{DIAMOND} Maintain your balance\n\n"
-            f"{DIAMOND} Enjoy your profit\n\n"
-            f"⚡⚡⚡⚡\n\n"
-            
-            f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}\n"
+            f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
         )
         
         if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
@@ -481,14 +552,11 @@ def send_welcome(message):
                 f"{LOCK} *SHARE REQUIREMENT*\n\n"
                 f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
                 f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
-                "HOW TO REFER:\n"
-                "1. Click 'Share Bot' below\n\n"
-                "2. Send to friends\n\n"
-                "3. They must START BOT the BOT and join CHANNEL through it\n\n"
-                "4. Click Verify after they join\n\n"
-                "Complete now to unlock Request for Live Pridiction\n\n"
-                "⚡⚡⚡⚡ \n"
-            
+                "How to refer:\n"
+                "1. Click 'Share Bot' below\n"
+                "2. Send to friends\n"
+                "3. They must JOIN CHANNEL and START bot\n"
+                "4. Verify after they join"
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
@@ -574,10 +642,12 @@ def handle_prediction(call):
             bot.answer_callback_query(call.id, "❌ Complete sharing first!", show_alert=True)
             return
             
-        if user_id in cooldowns and (remaining := cooldowns[user_id] - time.time()) > 0:
-            mins, secs = divmod(int(remaining), 60)
-            bot.answer_callback_query(call.id, f"{LOCK} Wait {mins}m {secs}s", show_alert=True)
-            return
+        # Thread-safe cooldown check
+        with cooldown_lock:
+            if user_id in cooldowns and (remaining := cooldowns[user_id] - time.time()) > 0:
+                mins, secs = divmod(int(remaining), 60)
+                bot.answer_callback_query(call.id, f"{LOCK} Wait {mins}m {secs}s", show_alert=True)
+                return
 
         try:
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
@@ -586,7 +656,7 @@ def handle_prediction(call):
 
         if user_id not in first_time_users:
             try:
-                bot.send_sticker(user_id, ROCKET_STICKER_ID)
+                safe_telegram_call(bot.send_sticker, user_id, ROCKET_STICKER_ID)
                 first_time_users.add(user_id)
             except:
                 pass
@@ -602,8 +672,13 @@ def handle_prediction(call):
             f"{HOURGLASS} Next in {COOLDOWN_SECONDS//60} minutes"
         )
         
-        bot.send_message(user_id, prediction_msg, reply_markup=get_main_markup(user_id), parse_mode="Markdown")
-        cooldowns[user_id] = time.time() + COOLDOWN_SECONDS
+        safe_telegram_call(bot.send_message, user_id, prediction_msg, 
+                          reply_markup=get_main_markup(user_id), parse_mode="Markdown")
+        
+        # Thread-safe cooldown update
+        with cooldown_lock:
+            cooldowns[user_id] = time.time() + COOLDOWN_SECONDS
+            
         bot.answer_callback_query(call.id, "✅ Prediction generated!")
         
     except Exception as e:
@@ -941,12 +1016,43 @@ def set_webhook():
         logger.info(f"Webhook set to: {webhook_url}")
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
+        
+        # ================= HEALTH CHECK ENDPOINT =================
+@app.route('/health')
+def health_check():
+    """Enhanced health check endpoint"""
+    try:
+        # Test database connection
+        with db_cursor() as cur:
+            cur.execute("SELECT 1")
+        
+        return jsonify({
+            "status": "healthy",
+            "database": "connected",
+            "cache": {
+                "membership": len(membership_cache.cache),
+                "referral": len(referral_cache.cache)
+            },
+            "cooldowns": len(cooldowns),
+            "timestamp": str(datetime.now(INDIAN_TIMEZONE))
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": str(datetime.now(INDIAN_TIMEZONE))
+        }), 500
+        
 
 # ================= MAIN =================
+# ================= MAIN EXECUTION =================
 if __name__ == '__main__':
     logger.info("🤖 Starting bot...")
     
-    # Initialize database
+    # Initialize database pool first
+    init_db_pool()
+    
+    # Then initialize database structure
     initialize_database()
     
     # Set up webhook
