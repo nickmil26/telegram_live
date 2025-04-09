@@ -487,11 +487,16 @@ def send_welcome(message):
         
         # Welcome message template
         welcome_msg = (
-            f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
-            f"{DIAMOND} Use suggested assurance for risk management\n"
-            f"{DIAMOND} Follow cooldown periods\n\n"
-            f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
-        )
+    "🚀 **WELCOME TO AI-POWERED PREDICTION BOT** 🚀\n"
+    "*Precision Forecasting at Your Fingertips*\n\n"
+    "🔹 **Key Features:**\n"
+    "✔ AI-driven insights for smarter decisions\n"
+    "✔ Suggested assurance for optimal risk management ⚖️\n"
+    "✔ Cooldown periods enforced for disciplined strategy ⏳\n\n"
+    "🔒 **Exclusive VIP Access:**\n"
+    "👉  @{CHANNEL_USERNAME} for premium signals & analytics\n\n"
+    "🎯 *Stay sharp. Trade smarter.*"
+)
         
         # Check user access level
         if user_status['is_member'] and (SHARES_REQUIRED == 0 or user_status['referral_count'] >= SHARES_REQUIRED):
