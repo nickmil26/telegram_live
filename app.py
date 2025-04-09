@@ -376,7 +376,7 @@ def get_main_markup(user_id):
     if is_member(user_id) and has_shared_enough(user_id):
         markup.row(
             telebot.types.InlineKeyboardButton(f"{ROCKET} Generate Prediction", callback_data="get_prediction"),
-            telebot.types.InlineKeyboardButton(f"📡 Request Live Prediction", callback_data="request_live")
+            telebot.types.InlineKeyboardButton(f"🔴 Request Live Prediction", callback_data="request_live")
         )
     return markup
 
@@ -458,6 +458,10 @@ def send_welcome(message):
             f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
             f"{DIAMOND} Use suggested assurance for risk management\n"
             f"{DIAMOND} Follow cooldown periods\n\n"
+            f"{DIAMOND} Maintain your balance\n\n"
+            f"{DIAMOND} Enjoy your profit\n\n"
+            f"{DIAMOND} ⚡⚡⚡⚡\n\n"
+            
             f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
         )
         
@@ -480,8 +484,8 @@ def send_welcome(message):
                 "How to refer:\n"
                 "1. Click 'Share Bot' below\n"
                 "2. Send to friends\n"
-                "3. They must JOIN CHANNEL and START bot\n"
-                "4. Verify after they join"
+                "3. They must START BOT the BOT and join CHANNEL through it\n"
+                "4. Click Verify after they join\n"
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
