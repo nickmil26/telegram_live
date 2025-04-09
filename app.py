@@ -456,13 +456,13 @@ def send_welcome(message):
         
         welcome_msg = (
             f"{GRAPH} *WELCOME TO AI-POWERED PREDICTION BOT* {GRAPH}\n\n"
-            f"{DIAMOND} Use suggested assurance for risk management\n"
+            f"{DIAMOND} Use suggested assurance for risk management\n\n"
             f"{DIAMOND} Follow cooldown periods\n\n"
             f"{DIAMOND} Maintain your balance\n\n"
             f"{DIAMOND} Enjoy your profit\n\n"
-            f"{DIAMOND} ⚡⚡⚡⚡\n\n"
+            f"⚡⚡⚡⚡\n\n"
             
-            f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}"
+            f"{SHIELD} *VIP Channel:* @{CHANNEL_USERNAME}\n"
         )
         
         if is_member(user_id) and (SHARES_REQUIRED == 0 or has_shared_enough(user_id)):
@@ -481,11 +481,14 @@ def send_welcome(message):
                 f"{LOCK} *SHARE REQUIREMENT*\n\n"
                 f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
                 f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
-                "How to refer:\n"
-                "1. Click 'Share Bot' below\n"
-                "2. Send to friends\n"
-                "3. They must START BOT the BOT and join CHANNEL through it\n"
-                "4. Click Verify after they join\n"
+                "HOW TO REFER:\n"
+                "1. Click 'Share Bot' below\n\n"
+                "2. Send to friends\n\n"
+                "3. They must START BOT the BOT and join CHANNEL through it\n\n"
+                "4. Click Verify after they join\n\n"
+                "Complete now to unlock Request for Live Pridiction\n\n"
+                "⚡⚡⚡⚡ \n"
+            )
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
