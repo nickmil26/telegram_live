@@ -1000,11 +1000,7 @@ def webhook():
         return ''
     return 'Invalid content type', 403
 
-@app.route('/')
-def health_check():
-    # Ping UptimeRobot on health check
-    ping_uptime_robot()
-    return jsonify({"status": "ok", "time": str(get_indian_time())})
+
 
 def set_webhook():
     """Set up webhook for Telegram bot"""
