@@ -1151,15 +1151,17 @@ def get_users():
         return []
 
 # ================= WEBHOOK & HEALTH ENDPOINTS =================
-@app.route('/' + BOT_TOKEN, methods=['POST'])
-def webhook():
-    """Telegram webhook endpoint"""
+WEBHOOK_PATH = f'/{BOT_TOKEN}/{os.getenv("WEBHOOK_SECRET")}'
+
+@app.route(WEBHOOK_PATH, methods=['POST'])
+def secure_webhook():
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = telebot.types.Update.de_json(json_string)
         bot.process_new_updates([update])
         return ''
     return 'Invalid content type', 403
+
 
 @app.route('/')
 def index():
@@ -1191,33 +1193,42 @@ def health_check():
             "timestamp": str(datetime.now(INDIAN_TIMEZONE))
         }), 500
 
-def set_webhook():
-    """Configure Telegram webhook"""
+def set_secure_webhook():
     try:
+        # Remove any existing webhook
         bot.remove_webhook()
-        time.sleep(1)
-        webhook_url = f"{SERVER_URL}/{BOT_TOKEN}"
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook successfully set to: {webhook_url}")
+        time.sleep(2)
+        
+        # Set new secure webhook
+        webhook_url = f"{SERVER_URL}{WEBHOOK_PATH}"
+        bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True
+        )
+        logger.info(f"Webhook securely set to: {webhook_url}")
     except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
+        logger.error(f"Webhook error: {e}")
+        notify_admins(f"🚨 Webhook setup failed: {e}")
+
+
+def verify_webhook_ownership():
+    current = bot.get_webhook_info()
+    expected = f"{SERVER_URL}{WEBHOOK_PATH}"
+    if current.url != expected:
+        logger.critical(f"WEBHOOK HIJACKED! Resetting...")
+        set_secure_webhook()
+        notify_admins("🚨 Webhook hijack detected and reset!")
 
 # ================= MAIN EXECUTION =================
 if __name__ == '__main__':
-    logger.info("🤖 Starting bot initialization...")
+    logger.info("Starting bot...")
+    init_db_pool()
+    initialize_database()
     
-    try:
-        # Initialize database connection pool
-        init_db_pool()
-        
-        # Create database tables if they don't exist
-        initialize_database()
-        
-        # Configure webhook
-        set_webhook()
-        
-        # Start Flask server
-        app.run(host='0.0.0.0', port=WEBHOOK_PORT)
-    except Exception as e:
-        logger.critical(f"Failed to start bot: {e}")
-        raise
+    # Secure webhook setup
+    set_secure_webhook()  # NEW FUNCTION
+    
+    # Start periodic webhook checks (every 1 hour)
+    Thread(target=lambda: [time.sleep(3600), verify_webhook_ownership()], daemon=True).start()
+    
+    app.run(host='0.0.0.0', port=WEBHOOK_PORT)
