@@ -487,15 +487,15 @@ def send_welcome(message):
         
         # Welcome message template
         welcome_msg = (
-    "🚀 **WELCOME TO AI-POWERED PREDICTION BOT** 🚀\n"
-    "*Precision Forecasting at Your Fingertips*\n\n"
-    "🔹 **Key Features:**\n"
-    "✔ AI-driven insights for smarter decisions\n"
-    "✔ Suggested assurance for optimal risk management ⚖️\n"
-    "✔ Cooldown periods enforced for disciplined strategy ⏳\n\n"
-    "🔒 **Exclusive VIP Access:**\n"
-    "👉  @{CHANNEL_USERNAME} for premium signals & analytics\n\n"
-    "🎯 *Stay sharp. Trade smarter.*"
+    f"🚀 **WELCOME TO AI-POWERED PREDICTION BOT** 🚀\n"
+    f"*Precision Forecasting at Your Fingertips*\n\n"
+    f"🔹 **Key Features:**\n"
+    f"✔ AI-driven insights for smarter decisions\n"
+    f"✔ Suggested assurance for optimal risk management ⚖️\n"
+    f"✔ Cooldown periods enforced for disciplined strategy ⏳\n\n"
+    f"🔒 **Exclusive VIP Access:**\n"
+    f"👉  @{CHANNEL_USERNAME} for premium signals & analytics\n\n"
+    f"🎯 *Stay sharp. Trade smarter.*"
 )
         
         # Check user access level
