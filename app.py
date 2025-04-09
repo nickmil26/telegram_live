@@ -488,7 +488,7 @@ def send_welcome(message):
                 "4. Click Verify after they join\n\n"
                 "Complete now to unlock Request for Live Pridiction\n\n"
                 "⚡⚡⚡⚡ \n"
-            )
+            
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
