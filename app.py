@@ -521,14 +521,18 @@ def send_welcome(message):
             # Member but needs more referrals
             shares_count = user_status['referral_count']
             share_msg = (
-                f"{LOCK} *SHARE REQUIREMENT*\n\n"
-                f"Refer {SHARES_REQUIRED} friend{'s' if SHARES_REQUIRED > 1 else ''} (who join channel) to unlock.\n"
-                f"Current valid referrals: {shares_count}/{SHARES_REQUIRED}\n\n"
-                "How to refer:\n"
-                "1. Click 'Share Bot' below\n"
-                "2. Send to friends\n"
-                "3. They must JOIN CHANNEL and START bot\n"
-                "4. Verify after they join"
+                    "🔓 *Unlock Access | Referral Required*\n\n"
+    f"To unlock full access, refer **{SHARES_REQUIRED} friend** to join our channel.\n\n"
+    
+    f"✅ **Valid Referrals:**  {shares_count}/{SHARES_REQUIRED}\n\n"
+    "📌 *How to Refer:*\n\n"
+    "1. 📤 *Share the Bot* – Click *'Share Bot'* below.\n\n"
+    "2. 👥 *Invite Friends* – Send them the link.\n\n"
+    "3. ✅ *They Must:*\n\n"
+    "   - **START** the Bot.\n\n"
+    f"   - **JOIN** the channel.\n\n"
+    f"4. 🔍 *Verify* – Their join will be checked automatically.\n\n"
+    f"Thank you for helping us grow!🚀\n\n"
             )
             bot.send_message(user_id, share_msg, reply_markup=get_share_markup(user_id), parse_mode="Markdown")
             
