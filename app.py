@@ -491,12 +491,12 @@ def send_welcome(message):
     "Thank you for helping us grow! Our bot is still in development, "
     "and your support allows us to improve it further.\n\n"
     
-    "✨ *Now Unlocked:*\n"
-    "✔ **AI-Driven Insights** - Smarter decision-making\n"
-    "✔ **Risk Management** - Suggested assurance for optimal safety\n"
-    "✔ **Cooldown Enforcement** - Disciplined trading strategy\n"
-    "✔ **Balance Protection** - Follow our advice for best results\n"
-    "✔ **Live Predictions** - Request premium insights from admins\n\n"
+    "✨ *Now Unlocked:*\n\n"
+    "✅ **AI-Driven Insights** - Smarter decision-making\n"
+    "✅ **Risk Management** - Suggested assurance for optimal safety\n"
+    "✅ **Cooldown Enforcement** - Disciplined trading strategy\n"
+    "✅ **Balance Protection** - Follow our advice for best results\n"
+    "✅ **Live Predictions** - Request premium insights from admins\n\n"
     
     "🔒 *Exclusive VIP Access:*\n"
     "👉 @testsub01 - For premium signals & advanced analytics\n\n"
