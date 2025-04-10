@@ -532,11 +532,11 @@ def send_welcome(message):
     
     f"✅ **Valid Referrals:**  {shares_count}/{SHARES_REQUIRED}\n\n"
     "📌 *How to Refer:*\n\n"
-    "1. 📤 *Share the Bot* – Click *'Share Bot'* below.\n\n"
-    "2. 👥 *Invite Friends* – Send them the link.\n\n"
-    "3. ✅ *They Must:*\n\n"
-    "   - **START** the Bot.\n\n"
-    f"   - **JOIN** the channel.\n\n"
+    "1. 📤 *Share the Bot* – Click *'Share Bot'* below.\n"
+    "2. 👥 *Invite Friends* – Send them the link.\n"
+    "3. ✅ *They Must:*\n"
+    "   🌟 **START** the Bot.\n"
+    f"  🌟 **JOIN** the channel.\n"
     f"4. 🔍 *Verify* – Their join will be checked automatically.\n\n"
     f"Thank you for helping us grow!🚀\n\n"
             )
@@ -918,7 +918,7 @@ def process_voice_message(message):
             return
             
         voice = message.voice.file_id
-        caption = message.caption if message.caption else "📡 *LIVE PREDICTION*"
+        caption = message.caption if message.caption else "🟢*LIVE PREDICTION*"
         
         verified_users = get_users()
         
