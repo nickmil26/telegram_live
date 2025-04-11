@@ -256,7 +256,17 @@ def initialize_database():
             id SERIAL PRIMARY KEY,
             user_id BIGINT NOT NULL UNIQUE
         )
+        """,
         """
+        CREATE TABLE IF NOT EXISTS pending_referrals (
+            id SERIAL PRIMARY KEY,
+            referrer_id BIGINT NOT NULL,
+            referred_id BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(referred_id)  -- Only one pending referral per user
+        )
+        """
+        
     )
     
     try:
@@ -461,26 +471,29 @@ def send_welcome(message):
         referral_cache.pop(user_id, None)
         
         # Process referral if present in command and user is channel member
+        # Inside send_welcome(), find where referral is processed (~line 500)
         if len(message.text.split()) > 1:
-            user_status = get_user_status(user_id)
-            if user_status['is_member']:
-                try:
-                    referrer_str = message.text.split()[1]
-                    referrer_id = safe_int_convert(referrer_str)
-                    
-                    # Validate referral
-                    if referrer_id != 0 and referrer_id != user_id:
-                        with db_cursor() as cur:
-                            # Check if user is already registered
-                            cur.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
-                            if not cur.fetchone():  # Only proceed if new user
-                                if save_referral(referrer_id, user_id):
-                                    logger.info(f"New referral: {referrer_id} -> {user_id}")
-                                    # Clear relevant caches
-                                    referral_cache.pop(referrer_id, None)
-                                    membership_cache.pop(user_id, None)
-                except Exception as e:
-                    logger.error(f"Referral processing error: {e}")
+            try:
+                referrer_str = message.text.split()[1]
+                referrer_id = safe_int_convert(referrer_str)
+                
+                # Validate referral
+                if referrer_id != 0 and referrer_id != user_id:
+                    with db_cursor() as cur:
+                        # Store as pending referral (will be processed after verification)
+                        cur.execute(
+                            """
+                            INSERT INTO pending_referrals (referrer_id, referred_id)
+                            VALUES (%s, %s)
+                            ON CONFLICT (referred_id) DO UPDATE
+                            SET referrer_id = EXCLUDED.referrer_id
+                            """,
+                            (referrer_id, user_id)
+                        )
+                        logger.info(f"Pending referral stored: {referrer_id} -> {user_id}")
+            except Exception as e:
+                logger.error(f"Referral processing error: {e}")
+        
         
         # Get fresh user status after potential referral processing
         user_status = get_user_status(user_id)
@@ -561,9 +574,9 @@ def admin_panel(message):
         logger.error(f"Admin panel error for user {user_id}: {e}")
 
 # ================= CALLBACK QUERY HANDLERS =================
+
 @bot.callback_query_handler(func=lambda call: call.data == "check_membership")
 def check_membership(call):
-    """Handle membership verification callback"""
     try:
         user_id = call.message.chat.id
         # Clear cache for fresh check
@@ -573,6 +586,30 @@ def check_membership(call):
         user_status = get_user_status(user_id)
         
         if user_status['is_member']:
+            # Process any pending referral now that user is verified
+            with db_cursor() as cur:
+                # Check for pending referral
+                cur.execute(
+                    "DELETE FROM pending_referrals WHERE referred_id = %s RETURNING referrer_id",
+                    (user_id,)
+                )
+                result = cur.fetchone()
+                
+                if result:
+                    referrer_id = result[0]
+                    # Save the actual referral
+                    cur.execute(
+                        "INSERT INTO referrals (referrer_id, referred_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (referrer_id, user_id)
+                    )
+                    # Clear caches
+                    referral_cache.pop(referrer_id, None)
+                    membership_cache.pop(user_id, None)
+                    logger.info(f"Referral processed: {referrer_id} -> {user_id}")
+
+            # Refresh user status after referral processing
+            user_status = get_user_status(user_id)
+            
             if SHARES_REQUIRED == 0 or user_status['referral_count'] >= SHARES_REQUIRED:
                 bot.answer_callback_query(call.id, "✅ Fully verified! You can now get predictions.")
                 send_welcome(call.message)
@@ -1100,6 +1137,31 @@ def save_referral(referrer_id, referred_id):
             return True
     except Exception as e:
         logger.error(f"Error saving referral {referrer_id} -> {referred_id}: {e}")
+        return False
+
+def process_pending_referral(user_id):
+    """Process any pending referral for this user now that they're verified"""
+    try:
+        with db_cursor() as cur:
+            # Get and delete the pending referral
+            cur.execute(
+                "DELETE FROM pending_referrals WHERE referred_id = %s RETURNING referrer_id",
+                (user_id,)
+            )
+            result = cur.fetchone()
+            
+            if result:
+                referrer_id = result[0]
+                # Save the actual referral
+                if save_referral(referrer_id, user_id):
+                    logger.info(f"Pending referral processed: {referrer_id} -> {user_id}")
+                    # Clear caches
+                    referral_cache.pop(referrer_id, None)
+                    membership_cache.pop(user_id, None)
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Error processing pending referral for user {user_id}: {e}")
         return False
 
 def save_live_request(user_id):
