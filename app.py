@@ -1168,23 +1168,38 @@ def admin_actions(call):
                 logger.error(f"clear_requests failed: {e}")
                 bot.answer_callback_query(call.id, "⚠️ Error clearing requests")
        
-       elif call.data == "check_users":
-
-            users = get_users()
-
-            if not users:
-                msg = "👥 No users found in database."
-            else:
-                msg = f"👥 Total Users: {len(users)}\n\n"
-                msg += "\n".join(
-                    f"{idx+1}. ID: {user['user_id']} | @{user['username'] if user['username'] else ''} {user['first_name'] or ''} {user['last_name'] or ''}"
-                    for idx, user in enumerate(users[:10])
-                )
-                if len(users) > 10:
-                    msg += f"\n\n...and {len(users)-10} more"
-            bot.send_message(user_id, msg)
-            bot.answer_callback_query(call.id)
-       
+        elif call.data == "check_users":
+            try:
+                # Immediate feedback that request is processing
+                bot.answer_callback_query(call.id, "⏳ Processing...")
+                
+                users = get_users()
+                if not users:
+                    msg = "👥 No users found in database."
+                else:
+                    msg = f"👥 Total Users: {len(users)}\n\n"
+                    msg += "\n".join(
+                        f"{idx+1}. ID: {user['user_id']} | @{user['username'] if user['username'] else ''} {user['first_name'] or ''} {user['last_name'] or ''}"
+                        for idx, user in enumerate(users[:10])
+                    )
+                    if len(users) > 10:
+                        msg += f"\n\n...and {len(users)-10} more"
+                
+                # Edit original message instead of sending new one
+                try:
+                    bot.edit_message_text(
+                        msg,
+                        call.message.chat.id,
+                        call.message.message_id,
+                        reply_markup=get_admin_markup()
+                    )
+                except:
+                    # Fallback to new message if edit fails
+                    bot.send_message(user_id, msg, reply_markup=get_admin_markup())
+                    
+            except Exception as e:
+                logger.error(f"check_users failed: {e}")
+                bot.answer_callback_query(call.id, "⚠️ Error getting users")
                 
     except Exception as e:
         logger.critical(f"Admin action handler crashed: {e}")
