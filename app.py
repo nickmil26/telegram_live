@@ -1317,7 +1317,7 @@ def count_live_requests():
         logger.error(f"Error counting live requests: {e}")
         return 0
 
-@timeout(5)  # 5 second timeout
+
 def clear_live_requests():
     """Safe clear operation with timeout"""
     try:
@@ -1331,14 +1331,12 @@ def clear_live_requests():
             cur.execute("TRUNCATE TABLE live_requests")
             return True
             
-    except TimeoutError:
-        logger.error("clear_live_requests timed out")
-        return False
+    
     except Exception as e:
         logger.error(f"clear_live_requests error: {e}")
         return False
 
-@timeout(5)  # 5 second timeout
+
 def get_live_requests(limit=50):
     """Safe version with timeout and connection validation"""
     try:
@@ -1357,9 +1355,7 @@ def get_live_requests(limit=50):
                 """, (limit,))
             return [str(row[0]) for row in cur.fetchall() if row[0]]
             
-    except TimeoutError:
-        logger.error("get_live_requests timed out")
-        return []
+    
     except Exception as e:
         logger.error(f"get_live_requests error: {e}")
         return []
