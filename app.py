@@ -25,6 +25,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
 # ================= ENHANCED CACHE IMPLEMENTATION =================
 class ExpiringCache:
     """
@@ -148,52 +149,82 @@ referral_cache = ExpiringCache(max_size=5000, ttl=3600)     # 1 hour TTL
 
 # ================= DATABASE CONNECTION POOL =================
 db_pool = None
+pool_lock = Lock()  # Add this line for thread safety
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def init_db_pool():
     """Initialize the database connection pool with retry logic"""
     global db_pool
     try:
+        # Get pool sizes from environment with defaults
+        min_conn = int(os.getenv('DB_POOL_MIN', 1))
+        max_conn = int(os.getenv('DB_POOL_MAX', 20))
+        
         db_url = os.getenv('DATABASE_URL')
         if db_url:
             result = urlparse(db_url)
             db_pool = psycopg2.pool.SimpleConnectionPool(
-                1, 20,
+                minconn=min_conn,
+                maxconn=max_conn,
                 database=result.path[1:],
                 user=result.username,
                 password=result.password,
                 host=result.hostname,
-                port=result.port
+                port=result.port,
+                connect_timeout=5  # Add connection timeout
             )
         else:
             db_pool = psycopg2.pool.SimpleConnectionPool(
-                1, 20,
+                minconn=min_conn,
+                maxconn=max_conn,
                 dbname=os.getenv('DB_NAME', 'telegram_bot'),
                 user=os.getenv('DB_USER', 'postgres'),
                 password=os.getenv('DB_PASSWORD', ''),
-                host=os.getenv('DB_HOST', 'localhost')
+                host=os.getenv('DB_HOST', 'localhost'),
+                connect_timeout=5
             )
-        logger.info("Database connection pool initialized successfully")
+        
+        # Set statement timeout for all connections
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout TO 5000")  # 5 second timeout
+                
+        logger.info(f"Database connection pool initialized (size {min_conn}-{max_conn})")
     except Exception as e:
-        logger.error(f"Database pool initialization error (attempt {init_db_pool.retry.statistics['attempt_number']}): {e}")
+        logger.error(f"Database pool initialization error: {e}")
         raise
 
 @contextmanager
 def db_connection():
-    """
-    Context manager for database connections.
-    Yields a connection from the pool and ensures it's returned.
-    """
+    """Enhanced context manager with connection validation"""
     conn = None
-    try:
-        conn = db_pool.getconn()
-        yield conn
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
-    finally:
-        if conn:
-            db_pool.putconn(conn)
+    with pool_lock:  # Add thread safety
+        try:
+            conn = db_pool.getconn()
+            
+            # Validate connection is still alive
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                
+            yield conn
+            
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            logger.error(f"Connection failed: {e}")
+            if conn:  # Ensure bad connection is discarded
+                db_pool.putconn(conn, close=True)
+            # Attempt to reinitialize pool
+            init_db_pool()
+            raise
+        except Exception as e:
+            logger.error(f"Database connection error: {e}")
+            raise
+        finally:
+            if conn:
+                try:
+                    db_pool.putconn(conn)
+                except Exception as e:
+                    logger.error(f"Error returning connection: {e}")
+                    conn.close()  # Ensure connection is closed if can't return to pool
 
 @contextmanager
 def db_cursor():
@@ -222,6 +253,39 @@ def check_db_connection():
     except Exception as e:
         logger.error(f"Database connection check failed: {e}")
         return False
+
+def get_pool_status():
+    """Return current pool status"""
+    return {
+        'min': db_pool.minconn,
+        'max': db_pool.maxconn,
+        'available': len(db_pool._pool),
+        'used': db_pool.maxconn - len(db_pool._pool)
+    }
+
+def maintain_pool():
+    """Clean up idle connections"""
+    with pool_lock:
+        try:
+            idle_threshold = time.time() - 3600  # 1 hour idle
+            for conn in list(db_pool._pool):
+                if getattr(conn, '_used', 0) < idle_threshold:
+                    db_pool._pool.remove(conn)
+                    conn.close()
+                    logger.info("Closed idle connection")
+        except Exception as e:
+            logger.error(f"Pool maintenance error: {e}")
+
+def check_pool_health():
+    """Verify pool is healthy"""
+    try:
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
 
 def initialize_database():
     """Create necessary tables if they don't exist"""
@@ -457,6 +521,10 @@ def ping_uptime_robot():
             logger.info("Successfully pinged UptimeRobot")
         except Exception as e:
             logger.error(f"Error pinging UptimeRobot: {e}")
+
+
+
+
 
 # ================= BOT MESSAGE HANDLERS =================
 @bot.message_handler(commands=['start', 'help'])
@@ -1038,7 +1106,7 @@ def process_sticker_message(message):
         
 @bot.callback_query_handler(func=lambda call: call.data in ["check_requests", "clear_requests", "check_users"])
 def admin_actions(call):
-    """Handle various admin actions"""
+    """Robust admin action handler with timeouts"""
     try:
         user_id = call.message.chat.id
         user_status = get_user_status(user_id)
@@ -1048,25 +1116,62 @@ def admin_actions(call):
             return
             
         if call.data == "check_requests":
-            requests = get_live_requests()
-            if not requests:
-                msg = "📊 No live prediction requests pending."
-            else:
-                msg = f"📊 Pending Live Requests: {len(requests)}\n\n"
-                msg += "\n".join(f"• User ID: {req}" for req in requests[:10])
-                if len(requests) > 10:
-                    msg += f"\n\n...and {len(requests)-10} more"
-            bot.send_message(user_id, msg)
-            bot.answer_callback_query(call.id)
-            
-        elif call.data == "clear_requests":
-            if clear_live_requests():
-                bot.answer_callback_query(call.id, "✅ All requests cleared!")
-            else:
-                bot.answer_callback_query(call.id, "❌ Failed to clear requests!")
+            try:
+                # Immediate feedback that request is processing
+                bot.answer_callback_query(call.id, "⏳ Processing...")
                 
-        elif call.data == "check_users":
+                requests = get_live_requests()
+                if not requests:
+                    msg = "📊 No live prediction requests pending."
+                else:
+                    msg = f"📊 Pending Live Requests: {len(requests)}\n\n"
+                    msg += "\n".join(f"• User ID: {req}" for req in requests[:10])
+                    if len(requests) > 10:
+                        msg += f"\n\n...and {len(requests)-10} more"
+                
+                # Edit original message instead of sending new one
+                try:
+                    bot.edit_message_text(
+                        msg,
+                        call.message.chat.id,
+                        call.message.message_id,
+                        reply_markup=get_admin_markup()
+                    )
+                except:
+                    # Fallback to new message if edit fails
+                    bot.send_message(user_id, msg, reply_markup=get_admin_markup())
+                    
+            except Exception as e:
+                logger.error(f"check_requests failed: {e}")
+                bot.answer_callback_query(call.id, "⚠️ Error checking requests")
+                
+        elif call.data == "clear_requests":
+            try:
+                # Immediate feedback
+                bot.answer_callback_query(call.id, "⏳ Clearing...")
+                
+                if clear_live_requests():
+                    # Edit original message to show success
+                    try:
+                        bot.edit_message_text(
+                            "✅ All requests cleared!",
+                            call.message.chat.id,
+                            call.message.message_id,
+                            reply_markup=get_admin_markup()
+                        )
+                    except:
+                        bot.send_message(user_id, "✅ All requests cleared!", reply_markup=get_admin_markup())
+                else:
+                    bot.answer_callback_query(call.id, "❌ Failed to clear requests")
+                    
+            except Exception as e:
+                logger.error(f"clear_requests failed: {e}")
+                bot.answer_callback_query(call.id, "⚠️ Error clearing requests")
+       
+       elif call.data == "check_users":
+
             users = get_users()
+
             if not users:
                 msg = "👥 No users found in database."
             else:
@@ -1079,9 +1184,14 @@ def admin_actions(call):
                     msg += f"\n\n...and {len(users)-10} more"
             bot.send_message(user_id, msg)
             bot.answer_callback_query(call.id)
-            
+       
+                
     except Exception as e:
-        logger.error(f"Admin action error for admin {user_id}: {e}")
+        logger.critical(f"Admin action handler crashed: {e}")
+        try:
+            bot.answer_callback_query(call.id, "⚠️ System error occurred")
+        except:
+            pass
 
 # ================= DATABASE OPERATIONS =================
 def save_user_if_eligible(user_info):
@@ -1192,24 +1302,51 @@ def count_live_requests():
         logger.error(f"Error counting live requests: {e}")
         return 0
 
+@timeout(5)  # 5 second timeout
 def clear_live_requests():
-    """Clear all live requests"""
+    """Safe clear operation with timeout"""
     try:
+        if not check_db_connection():
+            logger.warning("No healthy database connection")
+            return False
+
         with db_cursor() as cur:
-            cur.execute("TRUNCATE live_requests")
+            # Set statement timeout for this operation
+            cur.execute("SET LOCAL statement_timeout TO 3000")  # 3 seconds
+            cur.execute("TRUNCATE TABLE live_requests")
             return True
+            
+    except TimeoutError:
+        logger.error("clear_live_requests timed out")
+        return False
     except Exception as e:
-        logger.error(f"Error clearing live requests: {e}")
+        logger.error(f"clear_live_requests error: {e}")
         return False
 
-def get_live_requests():
-    """Get all live prediction requests"""
+@timeout(5)  # 5 second timeout
+def get_live_requests(limit=50):
+    """Safe version with timeout and connection validation"""
     try:
+        if not check_db_connection():
+            logger.warning("No healthy database connection")
+            return []
+
         with db_cursor() as cur:
-            cur.execute("SELECT user_id FROM live_requests")
-            return [str(row[0]) for row in cur.fetchall()]
+            # Set statement timeout for this operation
+            cur.execute("SET LOCAL statement_timeout TO 3000")  # 3 seconds
+            cur.execute("""
+                SELECT user_id 
+                FROM live_requests 
+                ORDER BY created_at DESC 
+                LIMIT %s
+                """, (limit,))
+            return [str(row[0]) for row in cur.fetchall() if row[0]]
+            
+    except TimeoutError:
+        logger.error("get_live_requests timed out")
+        return []
     except Exception as e:
-        logger.error(f"Error getting live requests: {e}")
+        logger.error(f"get_live_requests error: {e}")
         return []
 
 def get_users():
@@ -1248,14 +1385,15 @@ def index():
 
 @app.route('/health')
 def health_check():
-    """Comprehensive health check endpoint"""
+    """Enhanced health check with pool status"""
     try:
-        # Test database connection
         db_status = "connected" if check_db_connection() else "disconnected"
+        pool_status = get_pool_status() if db_pool else "not initialized"
         
         return jsonify({
             "status": "healthy",
             "database": db_status,
+            "connection_pool": pool_status,
             "cache": {
                 "membership": len(membership_cache.cache),
                 "referral": len(referral_cache.cache)
@@ -1296,11 +1434,33 @@ def verify_webhook_ownership():
         set_secure_webhook()
         notify_admins("🚨 Webhook hijack detected and reset!")
 
+
+
+
+
+def pool_monitor():
+    """Background thread to monitor pool health"""
+    while True:
+        time.sleep(300)  # Check every 5 minutes
+        try:
+            if not check_pool_health():
+                logger.warning("Pool health check failed, reinitializing")
+                init_db_pool()
+            maintain_pool()
+        except Exception as e:
+            logger.error(f"Pool monitor error: {e}")
+
+
 # ================= MAIN EXECUTION =================
 if __name__ == '__main__':
     logger.info("Starting bot...")
     init_db_pool()
     initialize_database()
+    
+    # Start pool monitoring thread
+
+    Thread(target=pool_monitor, daemon=True).start()
+    
     
     # Secure webhook setup
     set_secure_webhook()  # NEW FUNCTION
