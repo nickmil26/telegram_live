@@ -1375,6 +1375,7 @@ def get_users():
         logger.error(f"Error getting users: {e}")
         return []
 
+
 # ================= ADMIN STATUS COMMAND =================
 @bot.message_handler(commands=['status'])
 def admin_status(message):
@@ -1439,21 +1440,36 @@ def handle_status_callbacks(call):
 def check_database_status(call):
     """Check and report database health status"""
     try:
-        start_time = time.time()
-        is_healthy = check_db_connection()
-        response_time = (time.time() - start_time) * 1000  # in ms
+        is_healthy = False
+        response_time = "N/A"
+        pool_status = {}
         
-        pool_status = get_pool_status() if db_pool else {}
+        try:
+            start_time = time.time()
+            is_healthy = check_db_connection()
+            response_time = f"{(time.time() - start_time) * 1000:.1f}ms"
+            
+            if db_pool:
+                pool_status = {
+                    'used': db_pool.maxconn - len(db_pool._pool),
+                    'max': db_pool.maxconn,
+                    'available': len(db_pool._pool)
+                }
+        except Exception as e:
+            logger.warning(f"Database check error: {e}")
         
         message = (
             "🛢️ *Database Status*\n\n"
             f"• Connection: {'✅ Healthy' if is_healthy else '❌ Down'}\n"
-            f"• Response Time: {response_time:.2f}ms\n"
-            f"• Pool Size: {pool_status.get('used', 0)}/{pool_status.get('max', 0)} in use\n"
-            f"• Available: {pool_status.get('available', 0)} connections\n"
-            "\nLast error: " + (str(db_pool._errors[-1]) if db_pool and db_pool._errors else "None")
+            f"• Response Time: {response_time}\n"
         )
         
+        if pool_status:
+            message += (
+                f"• Pool Size: {pool_status.get('used', 0)}/{pool_status.get('max', 0)} in use\n"
+                f"• Available: {pool_status.get('available', 0)} connections\n"
+            )
+            
         edit_status_message(call, message)
         
     except Exception as e:
@@ -1463,20 +1479,22 @@ def check_database_status(call):
 def check_cache_status(call):
     """Check and report cache health status"""
     try:
-        membership_size = len(membership_cache.cache)
-        referral_size = len(referral_cache.cache)
+        membership_size = "N/A"
+        referral_size = "N/A"
         
-        # Calculate memory usage (approximate)
-        membership_mem = sum(len(str(k)) + len(str(v)) for k, v in membership_cache.cache.items())
-        referral_mem = sum(len(str(k)) + len(str(v)) for k, v in referral_cache.cache.items())
+        try:
+            membership_size = len(membership_cache.cache)
+            referral_size = len(referral_cache.cache)
+        except Exception as e:
+            logger.warning(f"Cache size check error: {e}")
         
         message = (
             "🗃️ *Cache Status*\n\n"
-            f"• Membership Cache: {membership_size} items (~{membership_mem/1024:.1f} KB)\n"
-            f"• Referral Cache: {referral_size} items (~{referral_mem/1024:.1f} KB)\n"
-            f"• Total: {membership_size + referral_size} items (~{(membership_mem + referral_mem)/1024:.1f} KB)\n\n"
-            f"ℹ️ Membership TTL: {membership_cache.ttl}s\n"
-            f"ℹ️ Referral TTL: {referral_cache.ttl}s"
+            f"• Membership Cache: {membership_size} items\n"
+            f"• Referral Cache: {referral_size} items\n"
+            f"• Cooldown Entries: {len(cooldowns)}\n\n"
+            f"ℹ️ Membership TTL: {getattr(membership_cache, 'ttl', 'N/A')}s\n"
+            f"ℹ️ Referral TTL: {getattr(referral_cache, 'ttl', 'N/A')}s"
         )
         
         edit_status_message(call, message)
@@ -1488,16 +1506,40 @@ def check_cache_status(call):
 def clear_all_caches(call):
     """Clear all cached data"""
     try:
-        with membership_cache.lock:
-            membership_cache.cache.clear()
-        with referral_cache.lock:
-            referral_cache.cache.clear()
-            
-        # Clear other caches if they exist
-        cooldowns.clear()
-        first_time_users.clear()
+        cleared = []
         
-        message = "🧹 *All Caches Cleared*\n\n✅ Successfully cleared:\n• Membership Cache\n• Referral Cache\n• Cooldowns\n• First-time Users"
+        try:
+            with membership_cache.lock:
+                membership_cache.cache.clear()
+            cleared.append("Membership Cache")
+        except Exception as e:
+            logger.warning(f"Failed to clear membership cache: {e}")
+            
+        try:
+            with referral_cache.lock:
+                referral_cache.cache.clear()
+            cleared.append("Referral Cache")
+        except Exception as e:
+            logger.warning(f"Failed to clear referral cache: {e}")
+            
+        try:
+            cooldowns.clear()
+            cleared.append("Cooldowns")
+        except Exception as e:
+            logger.warning(f"Failed to clear cooldowns: {e}")
+            
+        try:
+            first_time_users.clear()
+            cleared.append("First-time Users")
+        except Exception as e:
+            logger.warning(f"Failed to clear first-time users: {e}")
+        
+        message = "🧹 *Cache Clear Results*\n\n"
+        if cleared:
+            message += "✅ Cleared:\n" + "\n".join(f"• {name}" for name in cleared)
+        else:
+            message += "❌ Failed to clear any caches"
+            
         edit_status_message(call, message)
         
     except Exception as e:
@@ -1510,279 +1552,30 @@ def overall_system_check(call):
         checks = []
         
         # Database check
-        db_start = time.time()
-        db_ok = check_db_connection()
-        db_time = (time.time() - db_start) * 1000
-        checks.append(f"• Database: {'✅' if db_ok else '❌'} ({db_time:.1f}ms)")
-        
-        # Cache check
-        cache_ok = True
         try:
-            test_key = "healthcheck_" + str(time.time())
-            membership_cache[test_key] = True
-            if not membership_cache.get(test_key):
-                cache_ok = False
-        except:
-            cache_ok = False
-        checks.append(f"• Cache: {'✅' if cache_ok else '❌'}")
-        
-        # Bot API check
-        api_ok = True
-        try:
-            bot.get_me()
-        except:
-            api_ok = False
-        checks.append(f"• Telegram API: {'✅' if api_ok else '❌'}")
-        
-        # Webhook check
-        webhook_ok = True
-        try:
-            webhook_info = bot.get_webhook_info()
-            if not webhook_info.url or "pending updates" in str(webhook_info):
-                webhook_ok = False
-# ================= IMPROVED STATUS COMMAND =================
-@bot.message_handler(commands=['status'])
-def admin_status(message):
-    """Handle /status command - Admin system status dashboard"""
-    try:
-        user_id = message.chat.id
-        if not get_user_status(user_id).get('is_admin'):
-            bot.send_message(user_id, "⛔ Unauthorized access!")
-            return
-            
-        send_status_menu(user_id)
-        
-    except Exception as e:
-        logger.error(f"Status command error: {e}")
-        bot.send_message(user_id, "⚠️ Error loading status dashboard")
-
-def send_status_menu(chat_id, message_id=None):
-    """Send or update the status menu"""
-    markup = telebot.types.InlineKeyboardMarkup()
-    markup.row(
-        telebot.types.InlineKeyboardButton("🛢️ Database", callback_data="status_db"),
-        telebot.types.InlineKeyboardButton("🗃️ Cache", callback_data="status_cache")
-    )
-    markup.row(
-        telebot.types.InlineKeyboardButton("🧹 Clear Cache", callback_data="status_clear_cache"),
-        telebot.types.InlineKeyboardButton("🔄 Overall Check", callback_data="status_overall")
-    )
-    
-    text = "🛠️ *System Status Dashboard*\n\nSelect an option:"
-    
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text,
-                chat_id,
-                message_id,
-                reply_markup=markup,
-                parse_mode="Markdown"
-            )
-        except:
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('status_'))
-def handle_status_callbacks(call):
-    """Handle all status-related callback queries"""
-    try:
-        user_id = call.message.chat.id
-        if not get_user_status(user_id).get('is_admin'):
-            bot.answer_callback_query(call.id, "⛔ Unauthorized!")
-            return
-            
-        action = call.data.split('_')[1]
-        
-        if action == "db":
-            check_database_status(call)
-        elif action == "cache":
-            check_cache_status(call)
-        elif action == "clear_cache":
-            clear_all_caches(call)
-        elif action == "overall":
-            overall_system_check(call)
-        elif action == "menu":
-            send_status_menu(call.message.chat.id, call.message.message_id)
-            bot.answer_callback_query(call.id)
-            
-    except Exception as e:
-        logger.error(f"Status callback error: {e}")
-        bot.answer_callback_query(call.id, "⚠️ Action failed. Try again.")
-
-def check_database_status(call):
-    """Check and report database health status"""
-    try:
-        bot.answer_callback_query(call.id, "⏳ Checking database...")
-        
-        # Basic connection check
-        db_ok = False
-        response_time = "N/A"
-        pool_status = {}
-        
-        try:
-            start_time = time.time()
             db_ok = check_db_connection()
-            response_time = f"{(time.time() - start_time) * 1000:.1f}ms"
+            checks.append(f"• Database: {'✅' if db_ok else '❌'}")
         except Exception as e:
-            logger.warning(f"Database check error: {e}")
-        
-        # Pool status with fallback
-        try:
-            if db_pool:
-                pool_status = {
-                    'used': db_pool.maxconn - len(db_pool._pool),
-                    'max': db_pool.maxconn,
-                    'available': len(db_pool._pool)
-                }
-        except:
-            pass
-        
-        message = (
-            "🛢️ *Database Status*\n\n"
-            f"• Connection: {'✅ Healthy' if db_ok else '❌ Unavailable'}\n"
-            f"• Response Time: {response_time}\n"
-        )
-        
-        if pool_status:
-            message += (
-                f"• Pool Size: {pool_status.get('used', 0)}/{pool_status.get('max', 0)} in use\n"
-                f"• Available: {pool_status.get('available', 0)} connections\n"
-            )
-        
-        edit_or_send_message(
-            call.message.chat.id,
-            call.message.message_id,
-            message,
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        logger.error(f"Database status failed: {e}")
-        bot.answer_callback_query(call.id, "⚠️ Couldn't check database")
-
-def check_cache_status(call):
-    """Check and report cache health status"""
-    try:
-        bot.answer_callback_query(call.id, "⏳ Checking caches...")
-        
-        membership_size = "N/A"
-        referral_size = "N/A"
-        
-        try:
-            membership_size = len(membership_cache.cache)
-            referral_size = len(referral_cache.cache)
-        except:
-            pass
-            
-        message = (
-            "🗃️ *Cache Status*\n\n"
-            f"• Membership Cache: {membership_size} items\n"
-            f"• Referral Cache: {referral_size} items\n"
-            f"• Cooldown Entries: {len(cooldowns)}\n\n"
-            f"ℹ️ Membership TTL: {getattr(membership_cache, 'ttl', 'N/A')}s\n"
-            f"ℹ️ Referral TTL: {getattr(referral_cache, 'ttl', 'N/A')}s"
-        )
-        
-        edit_or_send_message(
-            call.message.chat.id,
-            call.message.message_id,
-            message,
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        logger.error(f"Cache status failed: {e}")
-        bot.answer_callback_query(call.id, "⚠️ Couldn't check caches")
-
-def clear_all_caches(call):
-    """Clear all cached data"""
-    try:
-        bot.answer_callback_query(call.id, "⏳ Clearing caches...")
-        
-        cleared = []
-        
-        try:
-            with membership_cache.lock:
-                membership_cache.cache.clear()
-            cleared.append("Membership Cache")
-        except:
-            pass
-            
-        try:
-            with referral_cache.lock:
-                referral_cache.cache.clear()
-            cleared.append("Referral Cache")
-        except:
-            pass
-            
-        try:
-            cooldowns.clear()
-            cleared.append("Cooldowns")
-        except:
-            pass
-            
-        try:
-            first_time_users.clear()
-            cleared.append("First-time Users")
-        except:
-            pass
-            
-        message = "🧹 *Cache Clear Results*\n\n"
-        if cleared:
-            message += "✅ Cleared:\n" + "\n".join(f"• {name}" for name in cleared)
-        else:
-            message += "❌ Failed to clear any caches"
-            
-        edit_or_send_message(
-            call.message.chat.id,
-            call.message.message_id,
-            message,
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        logger.error(f"Cache clear failed: {e}")
-        bot.answer_callback_query(call.id, "⚠️ Cache clear failed")
-
-def overall_system_check(call):
-    """Perform comprehensive system health check"""
-    try:
-        bot.answer_callback_query(call.id, "⏳ Running system check...")
-        
-        checks = []
-        
-        # Database check with timeout
-        try:
-            db_ok = False
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(check_db_connection)
-                try:
-                    db_ok = future.result(timeout=3)  # 3 second timeout
-                    checks.append(f"• Database: {'✅' if db_ok else '❌'}")
-                except TimeoutError:
-                    checks.append("• Database: ⏳ Timeout")
-        except:
             checks.append("• Database: ❌ Check failed")
+            logger.warning(f"Database check failed: {e}")
         
         # Cache check
         try:
-            cache_ok = True
             test_key = "healthcheck_" + str(time.time())
             membership_cache[test_key] = True
-            if not membership_cache.get(test_key):
-                cache_ok = False
+            cache_ok = membership_cache.get(test_key, False)
             checks.append(f"• Cache: {'✅' if cache_ok else '❌'}")
-        except:
+        except Exception as e:
             checks.append("• Cache: ❌ Check failed")
+            logger.warning(f"Cache check failed: {e}")
         
         # Bot API check
         try:
             bot.get_me()
             checks.append("• Telegram API: ✅")
-        except:
+        except Exception as e:
             checks.append("• Telegram API: ❌")
+            logger.warning(f"Telegram API check failed: {e}")
         
         # Memory check (optional)
         try:
@@ -1790,44 +1583,78 @@ def overall_system_check(call):
             process = psutil.Process()
             mem_info = process.memory_info()
             checks.append(f"\n💾 Memory: {mem_info.rss/1024/1024:.1f}MB")
-        except:
+        except ImportError:
+            checks.append("\n💾 Memory: ❌ psutil not installed")
+        except Exception as e:
             checks.append("\n💾 Memory: ❌ Stats unavailable")
+            logger.warning(f"Memory check failed: {e}")
         
         message = "🔄 *System Health Check*\n\n" + "\n".join(checks)
         
-        edit_or_send_message(
-            call.message.chat.id,
-            call.message.message_id,
-            message,
-            parse_mode="Markdown"
-        )
+        edit_status_message(call, message)
         
     except Exception as e:
         logger.error(f"System check failed: {e}")
         bot.answer_callback_query(call.id, "⚠️ System check failed")
 
-def edit_or_send_message(chat_id, message_id, text, **kwargs):
-    """Helper to edit message or send new if edit fails"""
+def edit_status_message(call, message):
+    """Helper to edit the status message with new content"""
     try:
         markup = telebot.types.InlineKeyboardMarkup()
-        markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="status_menu"))
+        markup.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="back_to_status"))
         
-        if message_id:
-            try:
-                bot.edit_message_text(
-                    text,
-                    chat_id,
-                    message_id,
-                    reply_markup=markup,
-                    **kwargs
-                )
-                return
-            except:
-                pass
-                
-        bot.send_message(chat_id, text, reply_markup=markup, **kwargs)
+        bot.edit_message_text(
+            message,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
     except Exception as e:
-        logger.error(f"Message update failed: {e}")
+        logger.warning(f"Couldn't edit status message: {e}")
+        bot.send_message(
+            call.message.chat.id,
+            message,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_status")
+def back_to_status(call):
+    """Return to main status menu"""
+    try:
+        user_id = call.message.chat.id
+        user_status = get_user_status(user_id)
+        
+        if not user_status['is_admin']:
+            bot.answer_callback_query(call.id, "⛔ Unauthorized!")
+            return
+            
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.row(
+            telebot.types.InlineKeyboardButton("🛢️ Database", callback_data="status_db"),
+            telebot.types.InlineKeyboardButton("🗃️ Cache", callback_data="status_cache")
+        )
+        markup.row(
+            telebot.types.InlineKeyboardButton("🧹 Clear Cache", callback_data="status_clear_cache"),
+            telebot.types.InlineKeyboardButton("🔄 Overall Check", callback_data="status_overall")
+        )
+        
+        bot.edit_message_text(
+            "🛠️ *System Status Dashboard*\n\n"
+            "Select an option to check system components:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        logger.error(f"Back to status error: {e}")
+        bot.answer_callback_query(call.id, "⚠️ Error returning to status")
+
 
 # ================= WEBHOOK & HEALTH ENDPOINTS =================
 WEBHOOK_PATH = f'/{BOT_TOKEN}/{os.getenv("WEBHOOK_SECRET")}'
