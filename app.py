@@ -152,45 +152,6 @@ def run_load_test(admin_chat_id):
         
         return test_results
 
-@bot.message_handler(commands=['loadtest'])
-def handle_load_test(message):
-    """Admin command to run load test"""
-    user_status = get_user_status(message.chat.id)
-    
-    if not user_status['is_admin']:
-        bot.reply_to(message, "⛔ Unauthorized!")
-        return
-    
-    # Send initial confirmation
-    bot.reply_to(message, "🧪 Starting comprehensive load test... Watch this chat for updates.")
-    
-    # Run test in background to avoid timeout
-    def run_test_in_background():
-        test_results = run_load_test(message.chat.id)
-        
-        # Final summary with formatting
-        summary = (
-            f"<b>LOAD TEST SUMMARY</b>\n"
-            f"<pre>"
-            f"Users      : {test_results['total_users']}\n"
-            f"Predictions: {test_results['predictions']}\n"
-            f"Live reqs  : {test_results['live_requests']}\n"
-            f"Errors     : {len(test_results['errors'])}\n"
-            f"Duration   : {time.time() - test_results['start_time']:.2f}s\n"
-            f"</pre>"
-        )
-        
-        if test_results['errors']:
-            summary += "\n⚠️ <i>Errors occurred - check logs for details</i>"
-        
-        bot.send_message(
-            message.chat.id,
-            summary,
-            parse_mode="HTML"
-        )
-    
-    # Start the test in a new thread
-    Thread(target=run_test_in_background).start()
 
 
 
