@@ -585,7 +585,13 @@ def ping_uptime_robot():
         except Exception as e:
             logger.error(f"Error pinging UptimeRobot: {e}")
 
-
+def get_progress_bar(current, total=SHARES_REQUIRED, width=10):
+    """Generate a visual progress bar"""
+    progress = min(current / total, 1.0)
+    filled = round(width * progress)
+    empty = width - filled
+    return f"{'⬜' * filled}{'⬛' * empty} {current}/{total}"
+    
 
 
 
@@ -670,10 +676,12 @@ def send_welcome(message):
         else:
             # Member but needs more referrals
             shares_count = user_status['referral_count']
+            progress_bar = get_progress_bar(shares_count)
             share_msg = (
                     "🔓 *Unlock Access | Referral Required*\n\n"
     f"To unlock full access, refer **{SHARES_REQUIRED} friend** to join our channel.\n\n"
-    
+                
+    f"📊 Progress: {progress_bar}\n\n"   
     f"✅ **Valid Referrals:**  {shares_count}/{SHARES_REQUIRED}\n\n"
     "📌 *How to Refer:*\n\n"
     "1. 📤 *Share the Bot* – Click *'Share Bot'* below.\n"
