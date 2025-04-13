@@ -132,19 +132,19 @@ def run_load_test(admin_chat_id):
         # Generate final report
         duration = time.time() - test_results['start_time']
         report = (
-            f"🏁 LOAD TEST COMPLETE\n\n"
+            "🏁 LOAD TEST COMPLETE\n\n"
             f"⏱ Duration: {duration:.2f}s\n"
             f"👥 Users simulated: {test_results['total_users']}\n"
             f"🎯 Predictions: {test_results['predictions']}\n"
             f"📡 Live requests: {test_results['live_requests']}\n"
-            f"❌ Errors: {len(test_results['errors']}\n\n"
+            f"❌ Errors: {len(test_results['errors'])}\n\n"
         )
         
         # Include sample errors if any
         if test_results['errors']:
             report += "🔧 Error Samples:\n"
             for error in test_results['errors'][:3]:  # Show first 3 errors
-                report += f"• {error[:100]}...\n"
+                report += f"• {error[:100]}{'...' if len(error) > 100 else ''}\n"
             if len(test_results['errors']) > 3:
                 report += f"• ...and {len(test_results['errors'])-3} more\n"
         
