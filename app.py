@@ -1491,13 +1491,11 @@ def get_active_connections(call):
         active_conns = []
         try:
             with pool_lock, tracker_lock:
-                # Get all connections with recent activity
                 active_conns = [
                     (conn_id, last_used)
                     for conn_id, last_used in connection_tracker.items()
-                    if last_used > time.time() - 300  # Last 5 minutes
+                    if last_used > time.time() - 300
                 ]
-                # Sort by most recent
                 active_conns.sort(key=lambda x: x[1], reverse=True)
         except Exception as e:
             logger.error(f"Error getting active connections: {e}")
@@ -1508,7 +1506,6 @@ def get_active_connections(call):
             "Recent operations:\n"
         )
         
-        # Add connection details if available
         if active_conns:
             for i, (conn_id, last_used) in enumerate(active_conns[:5], 1):
                 time_str = time.strftime("%H:%M:%S", time.localtime(last_used))
@@ -1577,17 +1574,17 @@ def handle_status_callbacks(call):
             clear_all_caches(call)
         elif action == "overall":
             overall_system_check(call)
-        
-        # Add these conditions to the if/elif chain in handle_status_callbacks
         elif action == "active_conns":
             get_active_connections(call)
         elif action == "reset_pool":
-            reset_connection_pool(call)    
-            
+            reset_connection_pool(call)
+        else:
+            bot.answer_callback_query(call.id, "⚠️ Unknown action")
             
     except Exception as e:
         logger.error(f"Status callback error: {e}")
         bot.answer_callback_query(call.id, "⚠️ Status check failed")
+
 
 def check_database_status(call):
     """Check and report database health status"""
@@ -1791,6 +1788,11 @@ def back_to_status(call):
         markup.row(
             telebot.types.InlineKeyboardButton("🧹 Clear Cache", callback_data="status_clear_cache"),
             telebot.types.InlineKeyboardButton("🔄 Overall Check", callback_data="status_overall")
+        )
+
+        markup.row(
+            telebot.types.InlineKeyboardButton("🔍 Active Connections", callback_data="status_active_conns"),
+            telebot.types.InlineKeyboardButton("🔄 Reset Pool", callback_data="status_reset_pool")
         )
         
         bot.edit_message_text(
