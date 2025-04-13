@@ -585,22 +585,36 @@ def ping_uptime_robot():
         except Exception as e:
             logger.error(f"Error pinging UptimeRobot: {e}")
 
-def get_progress_bar(current, total, max_width=10):
-    """Create an adaptive progress bar"""
-    # Calculate the minimum width needed to show progress properly
-    min_width = total
-    width = min(max_width, min_width)  # Don't exceed max_width but show at least total blocks
+def get_progress_bar(current, total=1, max_width=10):
+    """
+    Create a visual progress bar
+    Args:
+        current: Number of completed referrals
+        total: Total required referrals (default=1)
+        max_width: Maximum width of progress bar (default=10)
+    """
+    try:
+        # Ensure valid inputs
+        current = max(0, int(current))
+        total = max(1, int(total))  # Minimum 1 to avoid division by zero
+        
+        # Calculate progress
+        progress = min(current / total, 1.0)
+        
+        # Special case for small requirements (1-3)
+        if total <= 3:
+            return f"{'🟩' * current}{'⬜' * (total - current)} {current}/{total}"
+        
+        # For larger requirements
+        filled = min(round(max_width * progress), max_width)
+        empty = max_width - filled
+        percent = int(progress * 100)
+        
+        return f"{'🟩' * filled}{'⬜' * empty} {percent}% ({current}/{total})"
     
-    filled = min(current, total)
-    empty = width - filled
-    
-    # Special case when requirements are very low (like 1/1)
-    if total <= 3:
-        return f"{'🟩' * filled}{'⬜' * empty} {current}/{total}"
-    
-    # For higher requirements, use percentage
-    percent = int((current / total) * 100) if total > 0 else 0
-    return f"{'🟩' * filled}{'⬜' * empty} {percent}% ({current}/{total})"
+    except Exception as e:
+        logger.error(f"Progress bar error: {e}")
+        return f"[Progress: {current}/{total}]"  # Fallback text
     
 
 
@@ -686,12 +700,17 @@ def send_welcome(message):
         else:
             # Member but needs more referrals
             shares_count = user_status['referral_count']
-            progress_bar = get_progress_bar(shares_count)
+            shares_required = SHARES_REQUIRED or 1
+            
+            progress_display = get_progress_bar(
+    current=shares_count,
+    total=shares_required
+            )
             share_msg = (
                     "🔓 *Unlock Access | Referral Required*\n\n"
     f"To unlock full access, refer **{SHARES_REQUIRED} friend** to join our channel.\n\n"
                 
-    f"📊 Progress: {progress_bar}\n\n"   
+    f"📊 Progress: {progress_display}\n\n"   
     f"✅ **Valid Referrals:**  {shares_count}/{SHARES_REQUIRED}\n\n"
     "📌 *How to Refer:*\n\n"
     "1. 📤 *Share the Bot* – Click *'Share Bot'* below.\n"
