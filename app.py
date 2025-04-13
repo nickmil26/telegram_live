@@ -157,8 +157,8 @@ def init_db_pool():
     global db_pool
     try:
         # Get pool sizes from environment with defaults
-        min_conn = int(os.getenv('DB_POOL_MIN', 1))
-        max_conn = int(os.getenv('DB_POOL_MAX', 20))
+        min_conn = int(os.getenv('DB_POOL_MIN', 5))
+        max_conn = int(os.getenv('DB_POOL_MAX', 30))
         
         db_url = os.getenv('DATABASE_URL')
         if db_url:
@@ -196,11 +196,14 @@ def init_db_pool():
 
 @contextmanager
 def db_connection():
-    """Enhanced context manager with connection validation"""
+    """Enhanced context manager with connection validation and tracking"""
     conn = None
-    with pool_lock:  # Add thread safety
+    with pool_lock:
         try:
             conn = db_pool.getconn()
+            
+            # Track when connection was taken from pool
+            conn._used = time.time()
             
             # Validate connection is still alive
             with conn.cursor() as cur:
@@ -211,6 +214,10 @@ def db_connection():
         except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
             logger.error(f"Connection failed: {e}")
             if conn:  # Ensure bad connection is discarded
+                try:
+                    conn.close()
+                except:
+                    pass
                 db_pool.putconn(conn, close=True)
             # Attempt to reinitialize pool
             init_db_pool()
@@ -221,10 +228,18 @@ def db_connection():
         finally:
             if conn:
                 try:
+                    # Reset the connection before returning to pool
+                    try:
+                        conn.rollback()
+                    except:
+                        pass
                     db_pool.putconn(conn)
                 except Exception as e:
                     logger.error(f"Error returning connection: {e}")
-                    conn.close()  # Ensure connection is closed if can't return to pool
+                    try:
+                        conn.close()
+                    except:
+                        pass
 
 @contextmanager
 def db_cursor():
@@ -264,15 +279,34 @@ def get_pool_status():
     }
 
 def maintain_pool():
-    """Clean up idle connections"""
+    """Clean up idle connections and recycle old ones"""
     with pool_lock:
         try:
-            idle_threshold = time.time() - 3600  # 1 hour idle
+            now = time.time()
+            idle_threshold = now - 3600  # 1 hour idle
+            old_threshold = now - 86400  # 24 hours old
+            
             for conn in list(db_pool._pool):
-                if getattr(conn, '_used', 0) < idle_threshold:
+                last_used = getattr(conn, '_used', 0)
+                
+                # Close and remove idle connections
+                if last_used < idle_threshold:
                     db_pool._pool.remove(conn)
                     conn.close()
                     logger.info("Closed idle connection")
+                
+                # Recycle old connections even if recently used
+                elif last_used < old_threshold:
+                    db_pool._pool.remove(conn)
+                    conn.close()
+                    logger.info("Recycled old connection")
+                    # Add a new connection to maintain pool size
+                    try:
+                        new_conn = db_pool._create_connection()
+                        db_pool._pool.append(new_conn)
+                    except Exception as e:
+                        logger.error(f"Error creating replacement connection: {e}")
+                        
         except Exception as e:
             logger.error(f"Pool maintenance error: {e}")
 
@@ -1397,6 +1431,11 @@ def admin_status(message):
             telebot.types.InlineKeyboardButton("🧹 Clear Cache", callback_data="status_clear_cache"),
             telebot.types.InlineKeyboardButton("🔄 Overall Check", callback_data="status_overall")
         )
+        # In the admin_status function, update the markup:
+        markup.row(
+            telebot.types.InlineKeyboardButton("🔍 Active Connections", callback_data="status_active_conns"),
+            telebot.types.InlineKeyboardButton("🔄 Reset Pool", callback_data="status_reset_pool")
+        )
         
         bot.send_message(
             user_id,
@@ -1409,6 +1448,82 @@ def admin_status(message):
     except Exception as e:
         logger.error(f"Status command error for admin {user_id}: {e}")
         bot.send_message(user_id, "⚠️ Error loading status dashboard")
+
+def get_active_connections(call):
+    """Show detailed info about active connections"""
+    try:
+        user_id = call.message.chat.id
+        user_status = get_user_status(user_id)
+        
+        if not user_status['is_admin']:
+            bot.answer_callback_query(call.id, "⛔ Unauthorized!")
+            return
+            
+        active_conns = []
+        try:
+            with pool_lock:
+                active_conns = [
+                    conn for conn in db_pool._pool 
+                    if getattr(conn, '_used', 0) > time.time() - 300
+                ]
+        except Exception as e:
+            logger.error(f"Error getting active connections: {e}")
+            
+        message = (
+            "🔍 *Active Connections*\n\n"
+            f"Total in use: {len(active_conns)}\n\n"
+            "Recent operations:\n"
+        )
+        
+        # Add connection details if available
+        if active_conns:
+            for i, conn in enumerate(active_conns[:5], 1):
+                last_used = time.strftime(
+                    "%H:%M:%S", 
+                    time.localtime(getattr(conn, '_used', 0))
+                )
+                message += f"{i}. Last used: {last_used}\n"
+            if len(active_conns) > 5:
+                message += f"\n...and {len(active_conns)-5} more"
+        else:
+            message += "No active connections found"
+            
+        edit_status_message(call, message)
+        
+    except Exception as e:
+        logger.error(f"Active connections check failed: {e}")
+        bot.answer_callback_query(call.id, "⚠️ Connection check failed")
+
+def reset_connection_pool(call):
+    """Force reset the connection pool"""
+    try:
+        user_id = call.message.chat.id
+        user_status = get_user_status(user_id)
+        
+        if not user_status['is_admin']:
+            bot.answer_callback_query(call.id, "⛔ Unauthorized!")
+            return
+            
+        # Immediate feedback
+        bot.answer_callback_query(call.id, "⏳ Resetting pool...")
+        
+        # Close all connections and reinitialize
+        try:
+            with pool_lock:
+                if db_pool:
+                    db_pool.closeall()
+            init_db_pool()
+            message = "✅ Connection pool reset successfully"
+        except Exception as e:
+            message = f"❌ Error resetting pool: {e}"
+            logger.error(message)
+            
+        edit_status_message(call, message)
+        
+    except Exception as e:
+        logger.error(f"Pool reset failed: {e}")
+        bot.answer_callback_query(call.id, "⚠️ Pool reset failed")
+
 
 # ================= STATUS CALLBACK HANDLERS =================
 @bot.callback_query_handler(func=lambda call: call.data.startswith('status_'))
@@ -1432,6 +1547,13 @@ def handle_status_callbacks(call):
             clear_all_caches(call)
         elif action == "overall":
             overall_system_check(call)
+        
+        # Add these conditions to the if/elif chain in handle_status_callbacks
+        elif action == "active_conns":
+            get_active_connections(call)
+        elif action == "reset_pool":
+            reset_connection_pool(call)    
+            
             
     except Exception as e:
         logger.error(f"Status callback error: {e}")
@@ -1731,14 +1853,31 @@ def verify_webhook_ownership():
 
 
 def pool_monitor():
-    """Background thread to monitor pool health"""
+    """Background thread to monitor pool health with enhanced checks"""
     while True:
         time.sleep(300)  # Check every 5 minutes
         try:
+            # Check pool health
             if not check_pool_health():
                 logger.warning("Pool health check failed, reinitializing")
                 init_db_pool()
+            
+            # Maintain pool - close idle connections
             maintain_pool()
+            
+            # Log pool status periodically
+            pool_status = get_pool_status()
+            logger.info(
+                f"Pool status - Used: {pool_status['used']}/"
+                f"{pool_status['max']}, Available: {pool_status['available']}"
+            )
+            
+            # If pool is nearly full, log a warning
+            if pool_status['used'] > pool_status['max'] * 0.8:
+                logger.warning(
+                    f"High pool usage: {pool_status['used']}/{pool_status['max']} connections in use"
+                )
+                
         except Exception as e:
             logger.error(f"Pool monitor error: {e}")
 
