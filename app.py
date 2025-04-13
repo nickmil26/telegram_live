@@ -1570,21 +1570,20 @@ def handle_status_callbacks(call):
             check_database_status(call)
         elif action == "cache":
             check_cache_status(call)
-        elif action == "clear_cache":
+        elif action == "clear" and call.data == "status_clear_cache":  # Explicit check for clear cache
             clear_all_caches(call)
+        elif action == "active" and call.data == "status_active_conns":  # Explicit check for active connections
+            get_active_connections(call)
+        elif action == "reset" and call.data == "status_reset_pool":  # Explicit check for reset pool
+            reset_connection_pool(call)
         elif action == "overall":
             overall_system_check(call)
-        elif action == "active_conns":
-            get_active_connections(call)
-        elif action == "reset_pool":
-            reset_connection_pool(call)
         else:
             bot.answer_callback_query(call.id, "⚠️ Unknown action")
             
     except Exception as e:
         logger.error(f"Status callback error: {e}")
         bot.answer_callback_query(call.id, "⚠️ Status check failed")
-
 
 def check_database_status(call):
     """Check and report database health status"""
