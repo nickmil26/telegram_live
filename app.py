@@ -52,46 +52,145 @@ class FakeCall:
         self.data = data
         self.id = random.randint(10000, 99999)
 
-def run_load_test():
+def send_test_update(chat_id, message):
+    """Helper to send test updates to admin"""
+    try:
+        bot.send_message(chat_id, f"🧪 TEST: {message}", disable_notification=True)
+    except Exception as e:
+        logger.error(f"Failed to send test update: {e}")
+
+def run_load_test(admin_chat_id):
     """Run a simulated load test with 100 fake users"""
-    logger.info("Starting fake load test for 100 users...")
-    start_time = time.time()
+    test_results = {
+        'total_users': 0,
+        'predictions': 0,
+        'live_requests': 0,
+        'errors': [],
+        'start_time': time.time()
+    }
+    
+    send_test_update(admin_chat_id, "🚀 Starting load test for 100 fake users...")
     
     try:
-        # Simulate 100 users
         for user_id in range(1, 101):
-            # 1. Each user starts with /start command
-            start_msg = FakeMessage(user_id, "/start")
-            send_welcome(start_msg)
+            test_results['total_users'] += 1
+            user_msg = f"👤 User {user_id}/100: "
             
-            # 2. 70% of users request a prediction
-            if random.random() < 0.7:
-                pred_call = FakeCall(user_id, "get_prediction")
-                handle_prediction(pred_call)
-            
-            # 3. 20% of users request live prediction
-            if random.random() < 0.2:
-                live_call = FakeCall(user_id, "request_live")
-                request_live_prediction(live_call)
-            
-            # 4. First user is treated as admin
-            if user_id == 1:
-                admin_msg = FakeMessage(user_id, "/admin")
-                admin_panel(admin_msg)
+            try:
+                # Simulate /start command
+                start_msg = FakeMessage(user_id, "/start")
+                send_welcome(start_msg)
+                user_msg += "✅ /start "
                 
-                status_call = FakeCall(user_id, "status_overall")
-                overall_system_check(status_call)
+                # Simulate prediction request (70% chance)
+                if random.random() < 0.7:
+                    try:
+                        pred_call = FakeCall(user_id, "get_prediction")
+                        handle_prediction(pred_call)
+                        test_results['predictions'] += 1
+                        user_msg += "🎯 prediction "
+                    except Exception as e:
+                        test_results['errors'].append(f"Prediction failed for user {user_id}: {str(e)}")
+                        user_msg += "❌ prediction "
                 
-                req_call = FakeCall(user_id, "check_requests")
-                admin_actions(req_call)
-        
-        duration = time.time() - start_time
-        logger.info(f"Fake load test completed for 100 users in {duration:.2f} seconds")
-        return True
+                # Simulate live request (20% chance)
+                if random.random() < 0.2:
+                    try:
+                        live_call = FakeCall(user_id, "request_live")
+                        request_live_prediction(live_call)
+                        test_results['live_requests'] += 1
+                        user_msg += "📡 live_req "
+                    except Exception as e:
+                        test_results['errors'].append(f"Live request failed for user {user_id}: {str(e)}")
+                        user_msg += "❌ live_req "
+                
+                # Admin actions for first user
+                if user_id == 1:
+                    try:
+                        admin_msg = FakeMessage(user_id, "/admin")
+                        admin_panel(admin_msg)
+                        status_call = FakeCall(user_id, "status_overall")
+                        overall_system_check(status_call)
+                        user_msg += "🛡️ admin_checks"
+                    except Exception as e:
+                        test_results['errors'].append(f"Admin check failed: {str(e)}")
+                        user_msg += "❌ admin_checks"
+                
+                # Send progress update every 10 users
+                if user_id % 10 == 0:
+                    send_test_update(admin_chat_id, user_msg)
+                    
+            except Exception as e:
+                test_results['errors'].append(f"User {user_id} failed completely: {str(e)}")
+                send_test_update(admin_chat_id, f"❌ User {user_id} failed: {str(e)}")
     
     except Exception as e:
-        logger.error(f"Load test failed: {str(e)}")
-        return False
+        test_results['errors'].append(f"Load test crashed: {str(e)}")
+        send_test_update(admin_chat_id, f"💥 TEST CRASHED: {str(e)}")
+    
+    finally:
+        # Generate final report
+        duration = time.time() - test_results['start_time']
+        report = (
+            f"🏁 LOAD TEST COMPLETE\n\n"
+            f"⏱ Duration: {duration:.2f}s\n"
+            f"👥 Users simulated: {test_results['total_users']}\n"
+            f"🎯 Predictions: {test_results['predictions']}\n"
+            f"📡 Live requests: {test_results['live_requests']}\n"
+            f"❌ Errors: {len(test_results['errors']}\n\n"
+        )
+        
+        # Include sample errors if any
+        if test_results['errors']:
+            report += "🔧 Error Samples:\n"
+            for error in test_results['errors'][:3]:  # Show first 3 errors
+                report += f"• {error[:100]}...\n"
+            if len(test_results['errors']) > 3:
+                report += f"• ...and {len(test_results['errors'])-3} more\n"
+        
+        send_test_update(admin_chat_id, report)
+        
+        return test_results
+
+@bot.message_handler(commands=['loadtest'])
+def handle_load_test(message):
+    """Admin command to run load test"""
+    user_status = get_user_status(message.chat.id)
+    
+    if not user_status['is_admin']:
+        bot.reply_to(message, "⛔ Unauthorized!")
+        return
+    
+    # Send initial confirmation
+    bot.reply_to(message, "🧪 Starting comprehensive load test... Watch this chat for updates.")
+    
+    # Run test in background to avoid timeout
+    def run_test_in_background():
+        test_results = run_load_test(message.chat.id)
+        
+        # Final summary with formatting
+        summary = (
+            f"<b>LOAD TEST SUMMARY</b>\n"
+            f"<pre>"
+            f"Users      : {test_results['total_users']}\n"
+            f"Predictions: {test_results['predictions']}\n"
+            f"Live reqs  : {test_results['live_requests']}\n"
+            f"Errors     : {len(test_results['errors'])}\n"
+            f"Duration   : {time.time() - test_results['start_time']:.2f}s\n"
+            f"</pre>"
+        )
+        
+        if test_results['errors']:
+            summary += "\n⚠️ <i>Errors occurred - check logs for details</i>"
+        
+        bot.send_message(
+            message.chat.id,
+            summary,
+            parse_mode="HTML"
+        )
+    
+    # Start the test in a new thread
+    Thread(target=run_test_in_background).start()
 
 
 
