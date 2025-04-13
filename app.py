@@ -26,6 +26,77 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+# ================= LOAD TESTING UTILITIES =================
+class FakeChat:
+    def __init__(self, id):
+        self.id = id
+
+class FakeUser:
+    def __init__(self, user_id):
+        self.id = user_id
+        self.username = f'testuser{user_id}'
+        self.first_name = f'Test{user_id}'
+        self.last_name = 'User'
+
+class FakeMessage:
+    def __init__(self, user_id, text):
+        self.chat = FakeChat(user_id)
+        self.from_user = FakeUser(user_id)
+        self.text = text
+        self.message_id = random.randint(1000, 9999)
+
+class FakeCall:
+    def __init__(self, user_id, data):
+        self.message = FakeMessage(user_id, "dummy")
+        self.from_user = FakeUser(user_id)
+        self.data = data
+        self.id = random.randint(10000, 99999)
+
+def run_load_test():
+    """Run a simulated load test with 100 fake users"""
+    logger.info("Starting fake load test for 100 users...")
+    start_time = time.time()
+    
+    try:
+        # Simulate 100 users
+        for user_id in range(1, 101):
+            # 1. Each user starts with /start command
+            start_msg = FakeMessage(user_id, "/start")
+            send_welcome(start_msg)
+            
+            # 2. 70% of users request a prediction
+            if random.random() < 0.7:
+                pred_call = FakeCall(user_id, "get_prediction")
+                handle_prediction(pred_call)
+            
+            # 3. 20% of users request live prediction
+            if random.random() < 0.2:
+                live_call = FakeCall(user_id, "request_live")
+                request_live_prediction(live_call)
+            
+            # 4. First user is treated as admin
+            if user_id == 1:
+                admin_msg = FakeMessage(user_id, "/admin")
+                admin_panel(admin_msg)
+                
+                status_call = FakeCall(user_id, "status_overall")
+                overall_system_check(status_call)
+                
+                req_call = FakeCall(user_id, "check_requests")
+                admin_actions(req_call)
+        
+        duration = time.time() - start_time
+        logger.info(f"Fake load test completed for 100 users in {duration:.2f} seconds")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Load test failed: {str(e)}")
+        return False
+
+
+
+
+
 # ================= ENHANCED CACHE IMPLEMENTATION =================
 class ExpiringCache:
     """
@@ -620,6 +691,60 @@ def get_progress_bar(current, total=1, max_width=10):
 
 
 # ================= BOT MESSAGE HANDLERS =================
+
+
+@bot.message_handler(commands=['loadtest'])
+def handle_load_test(message):
+    """Admin command to run load test"""
+    user_status = get_user_status(message.chat.id)
+    
+    if not user_status['is_admin']:
+        bot.reply_to(message, "⛔ Unauthorized!")
+        return
+    
+    bot.reply_to(message, "🚀 Starting fake load test...")
+    success = run_load_test()
+    
+    if success:
+        bot.reply_to(message, "✅ Fake load test completed successfully")
+    else:
+        bot.reply_to(message, "❌ Fake load test failed - check logs")
+
+
+
+@bot.message_handler(commands=['cleantest'])
+def handle_clean_test(message):
+    """Admin command to clean test data"""
+    user_status = get_user_status(message.chat.id)
+    
+    if not user_status['is_admin']:
+        bot.reply_to(message, "⛔ Unauthorized!")
+        return
+    
+    bot.reply_to(message, "🧹 Cleaning up test data...")
+    success = cleanup_test_data()
+    
+    if success:
+        bot.reply_to(message, "✅ Test data cleaned successfully")
+    else:
+        bot.reply_to(message, "❌ Cleanup failed - check logs")
+
+def cleanup_test_data():
+    """Clean up data created by load tests"""
+    try:
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM users WHERE username LIKE 'testuser%'")
+            cur.execute("DELETE FROM referrals WHERE referred_id <= 100")
+            cur.execute("DELETE FROM live_requests WHERE user_id <= 100")
+            cur.execute("DELETE FROM pending_referrals WHERE referred_id <= 100")
+        logger.info("Cleaned up test data")
+        return True
+    except Exception as e:
+        logger.error(f"Cleanup failed: {str(e)}")
+        return False
+
+# ======= TEST ENDS HERE========
+
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     """Handle /start and /help commands"""
