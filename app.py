@@ -143,6 +143,10 @@ first_time_users = set()  # Tracks users who received their first prediction
 cooldowns = {}  # Tracks user cooldowns
 cooldown_lock = Lock()  # Thread-safe cooldown access
 
+# Add this near your other global variables (around line 50)
+connection_tracker = {}  # Tracks last used time by connection id
+tracker_lock = Lock()  # For thread-safe access to the tracker
+
 # Extended cache TTLs for better performance
 membership_cache = ExpiringCache(max_size=5000, ttl=1800)  # 30 minute TTL
 referral_cache = ExpiringCache(max_size=5000, ttl=3600)     # 1 hour TTL
@@ -171,7 +175,7 @@ def init_db_pool():
                 password=result.password,
                 host=result.hostname,
                 port=result.port,
-                connect_timeout=5  # Add connection timeout
+                connect_timeout=5
             )
         else:
             db_pool = psycopg2.pool.SimpleConnectionPool(
@@ -183,6 +187,10 @@ def init_db_pool():
                 host=os.getenv('DB_HOST', 'localhost'),
                 connect_timeout=5
             )
+        
+        # Clear any old tracking data
+        with tracker_lock:
+            connection_tracker.clear()
         
         # Set statement timeout for all connections
         with db_connection() as conn:
@@ -198,12 +206,15 @@ def init_db_pool():
 def db_connection():
     """Enhanced context manager with connection validation and tracking"""
     conn = None
+    conn_id = None
     with pool_lock:
         try:
             conn = db_pool.getconn()
+            conn_id = id(conn)  # Get unique identifier for the connection
             
             # Track when connection was taken from pool
-            conn._used = time.time()
+            with tracker_lock:
+                connection_tracker[conn_id] = time.time()
             
             # Validate connection is still alive
             with conn.cursor() as cur:
@@ -219,6 +230,8 @@ def db_connection():
                 except:
                     pass
                 db_pool.putconn(conn, close=True)
+                with tracker_lock:
+                    connection_tracker.pop(conn_id, None)
             # Attempt to reinitialize pool
             init_db_pool()
             raise
@@ -234,12 +247,16 @@ def db_connection():
                     except:
                         pass
                     db_pool.putconn(conn)
+                    with tracker_lock:
+                        connection_tracker.pop(conn_id, None)
                 except Exception as e:
                     logger.error(f"Error returning connection: {e}")
                     try:
                         conn.close()
                     except:
                         pass
+                    with tracker_lock:
+                        connection_tracker.pop(conn_id, None)
 
 @contextmanager
 def db_cursor():
@@ -286,19 +303,31 @@ def maintain_pool():
             idle_threshold = now - 3600  # 1 hour idle
             old_threshold = now - 86400  # 24 hours old
             
+            with tracker_lock:
+                # Get connection IDs and their last used times
+                conn_status = {
+                    id(conn): connection_tracker.get(id(conn), 0)
+                    for conn in list(db_pool._pool)
+                }
+            
             for conn in list(db_pool._pool):
-                last_used = getattr(conn, '_used', 0)
+                conn_id = id(conn)
+                last_used = conn_status.get(conn_id, 0)
                 
                 # Close and remove idle connections
                 if last_used < idle_threshold:
                     db_pool._pool.remove(conn)
                     conn.close()
+                    with tracker_lock:
+                        connection_tracker.pop(conn_id, None)
                     logger.info("Closed idle connection")
                 
                 # Recycle old connections even if recently used
                 elif last_used < old_threshold:
                     db_pool._pool.remove(conn)
                     conn.close()
+                    with tracker_lock:
+                        connection_tracker.pop(conn_id, None)
                     logger.info("Recycled old connection")
                     # Add a new connection to maintain pool size
                     try:
@@ -1461,11 +1490,15 @@ def get_active_connections(call):
             
         active_conns = []
         try:
-            with pool_lock:
+            with pool_lock, tracker_lock:
+                # Get all connections with recent activity
                 active_conns = [
-                    conn for conn in db_pool._pool 
-                    if getattr(conn, '_used', 0) > time.time() - 300
+                    (conn_id, last_used)
+                    for conn_id, last_used in connection_tracker.items()
+                    if last_used > time.time() - 300  # Last 5 minutes
                 ]
+                # Sort by most recent
+                active_conns.sort(key=lambda x: x[1], reverse=True)
         except Exception as e:
             logger.error(f"Error getting active connections: {e}")
             
@@ -1477,12 +1510,9 @@ def get_active_connections(call):
         
         # Add connection details if available
         if active_conns:
-            for i, conn in enumerate(active_conns[:5], 1):
-                last_used = time.strftime(
-                    "%H:%M:%S", 
-                    time.localtime(getattr(conn, '_used', 0))
-                )
-                message += f"{i}. Last used: {last_used}\n"
+            for i, (conn_id, last_used) in enumerate(active_conns[:5], 1):
+                time_str = time.strftime("%H:%M:%S", time.localtime(last_used))
+                message += f"{i}. Last used: {time_str}\n"
             if len(active_conns) > 5:
                 message += f"\n...and {len(active_conns)-5} more"
         else:
@@ -1493,7 +1523,7 @@ def get_active_connections(call):
     except Exception as e:
         logger.error(f"Active connections check failed: {e}")
         bot.answer_callback_query(call.id, "⚠️ Connection check failed")
-
+        
 def reset_connection_pool(call):
     """Force reset the connection pool"""
     try:
