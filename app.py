@@ -585,12 +585,22 @@ def ping_uptime_robot():
         except Exception as e:
             logger.error(f"Error pinging UptimeRobot: {e}")
 
-def get_progress_bar(current, total=SHARES_REQUIRED, width=10):
-    """Generate a visual progress bar"""
-    progress = min(current / total, 1.0)
-    filled = round(width * progress)
+def get_progress_bar(current, total, max_width=10):
+    """Create an adaptive progress bar"""
+    # Calculate the minimum width needed to show progress properly
+    min_width = total
+    width = min(max_width, min_width)  # Don't exceed max_width but show at least total blocks
+    
+    filled = min(current, total)
     empty = width - filled
-    return f"{'⬜' * filled}{'⬛' * empty} {current}/{total}"
+    
+    # Special case when requirements are very low (like 1/1)
+    if total <= 3:
+        return f"{'🟩' * filled}{'⬜' * empty} {current}/{total}"
+    
+    # For higher requirements, use percentage
+    percent = int((current / total) * 100) if total > 0 else 0
+    return f"{'🟩' * filled}{'⬜' * empty} {percent}% ({current}/{total})"
     
 
 
