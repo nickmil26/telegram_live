@@ -806,16 +806,20 @@ def clean_test_data(message):
 
 # ================= INTEGRATION HELPERS =================
 
-def override_membership_check(user_id):
-    """Temporarily bypass real channel checks"""
+# ================= CORRECTED MEMBERSHIP CHECK OVERRIDE =================
+
+def override_membership_check():
+    """Temporarily bypass real channel checks for ALL test users (1-100)"""
     original_check = bot.get_chat_member
     
-    def mock_check(*args, **kwargs):
-        if args[1] <= 100:  # Our test users
+    def mock_check(chat_id, user_id, *args, **kwargs):
+        if isinstance(user_id, int) and 1 <= user_id <= 100:  # Our test user range
             return type('Member', (), {'status': 'member'})
-        return original_check(*args, **kwargs)
+        return original_check(chat_id, user_id, *args, **kwargs)
     
     bot.get_chat_member = mock_check
+
+
 
 # ======= TEST ENDS HERE========
 
