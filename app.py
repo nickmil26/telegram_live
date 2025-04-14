@@ -27,6 +27,36 @@ from urllib3.util.retry import Retry
 
 
 # ================= MOCK TELEGRAM API =================
+
+bot = telebot.TeleBot(BOT_TOKEN)  # Your existing line
+
+# ================= TEST CLASS DEFINITIONS =================
+class FakeChat:
+    def __init__(self, id):
+        self.id = id
+
+class FakeUser:
+    def __init__(self, user_id):
+        self.id = user_id
+        self.username = f'testuser{user_id}'
+        self.first_name = f'Test{user_id}'
+        self.last_name = 'User'
+
+class FakeMessage:
+    def __init__(self, user_id, text):
+        self.chat = FakeChat(user_id)
+        self.from_user = FakeUser(user_id)
+        self.text = text
+        self.message_id = random.randint(1000, 9999)
+
+class FakeCall:
+    def __init__(self, user_id, data):
+        self.message = FakeMessage(user_id, "dummy")
+        self.from_user = FakeUser(user_id)
+        self.data = data
+        self.id = random.randint(10000, 99999)
+
+
 class MockChatMember:
     def __init__(self):
         self.status = 'member'
