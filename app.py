@@ -26,7 +26,18 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-# ================= LOAD TESTING UTILITIES =================
+#!/usr/bin/env python3
+"""
+Telegram Bot Load Testing Script
+- Simulates 100 users with realistic channel joins and referrals
+- Creates actual database entries under proper conditions
+- Provides detailed Telegram updates
+"""
+
+
+
+# ================= FAKE USER GENERATION =================
+
 class FakeChat:
     def __init__(self, id):
         self.id = id
@@ -52,105 +63,112 @@ class FakeCall:
         self.data = data
         self.id = random.randint(10000, 99999)
 
-def send_test_update(chat_id, message):
-    """Helper to send test updates to admin"""
-    try:
-        bot.send_message(chat_id, f"🧪 TEST: {message}", disable_notification=True)
-    except Exception as e:
-        logger.error(f"Failed to send test update: {e}")
+# ================= LOAD TEST CORE =================
 
-def run_load_test(admin_chat_id):
-    """Run a simulated load test with 100 fake users"""
-    test_results = {
-        'total_users': 0,
-        'predictions': 0,
-        'live_requests': 0,
-        'errors': [],
-        'start_time': time.time()
-    }
-    
-    send_test_update(admin_chat_id, "🚀 Starting load test for 100 fake users...")
-    
-    try:
-        for user_id in range(1, 101):
-            test_results['total_users'] += 1
-            user_msg = f"👤 User {user_id}/100: "
+def simulate_channel_joins():
+    """Mark random users as channel members"""
+    channel_members = set()
+    for user_id in range(1, 101):
+        if random.random() < 0.8:  # 80% join rate
+            channel_members.add(user_id)
+            # Bypass real Telegram API check
+            membership_cache[user_id] = True  
+    return channel_members
+
+def create_test_referrals(channel_members):
+    """Generate valid referral relationships"""
+    referrals = []
+    for user_id in range(1, 101):
+        # Only if user joined channel and random chance
+        if user_id in channel_members and random.random() < 0.5 and user_id > 1:
+            referrer_id = random.choice(list(channel_members & set(range(1, user_id))))
+            referrals.append((referrer_id, user_id))
             
-            try:
-                # Simulate /start command
+            # Create actual DB entry
+            with db_cursor() as cur:
+                cur.execute(
+                    "INSERT INTO referrals (referrer_id, referred_id) VALUES (%s, %s)",
+                    (referrer_id, user_id)
+                )
+    return len(referrals)
+
+def run_realistic_load_test(admin_chat_id):
+    """Main test execution with progress reporting"""
+    try:
+        # Initial setup
+        test_start = time.time()
+        bot.send_message(admin_chat_id, "🌐 Starting realistic load test...")
+        
+        # Phase 1: Channel joins
+        bot.send_message(admin_chat_id, "🔄 Simulating channel joins...")
+        channel_members = simulate_channel_joins()
+        
+        # Phase 2: Referrals
+        bot.send_message(admin_chat_id, "🤝 Creating referral relationships...")
+        referrals_created = create_test_referrals(channel_members)
+        
+        # Phase 3: User actions
+        bot.send_message(admin_chat_id, "🚀 Simulating user activity...")
+        active_users = 0
+        predictions = 0
+        live_requests = 0
+        
+        for user_id in range(1, 101):
+            # Only process users who meet requirements
+            if user_id in channel_members and referrals_created >= SHARES_REQUIRED:
+                active_users += 1
+                
+                # Simulate /start
                 start_msg = FakeMessage(user_id, "/start")
                 send_welcome(start_msg)
-                user_msg += "✅ /start "
                 
-                # Simulate prediction request (70% chance)
+                # Simulate prediction (70% chance)
                 if random.random() < 0.7:
-                    try:
-                        pred_call = FakeCall(user_id, "get_prediction")
-                        handle_prediction(pred_call)
-                        test_results['predictions'] += 1
-                        user_msg += "🎯 prediction "
-                    except Exception as e:
-                        test_results['errors'].append(f"Prediction failed for user {user_id}: {str(e)}")
-                        user_msg += "❌ prediction "
+                    pred_call = FakeCall(user_id, "get_prediction")
+                    handle_prediction(pred_call)
+                    predictions += 1
                 
                 # Simulate live request (20% chance)
                 if random.random() < 0.2:
-                    try:
-                        live_call = FakeCall(user_id, "request_live")
-                        request_live_prediction(live_call)
-                        test_results['live_requests'] += 1
-                        user_msg += "📡 live_req "
-                    except Exception as e:
-                        test_results['errors'].append(f"Live request failed for user {user_id}: {str(e)}")
-                        user_msg += "❌ live_req "
+                    live_call = FakeCall(user_id, "request_live")
+                    request_live_prediction(live_call)
+                    live_requests += 1
                 
-                # Admin actions for first user
-                if user_id == 1:
-                    try:
-                        admin_msg = FakeMessage(user_id, "/admin")
-                        admin_panel(admin_msg)
-                        status_call = FakeCall(user_id, "status_overall")
-                        overall_system_check(status_call)
-                        user_msg += "🛡️ admin_checks"
-                    except Exception as e:
-                        test_results['errors'].append(f"Admin check failed: {str(e)}")
-                        user_msg += "❌ admin_checks"
-                
-                # Send progress update every 10 users
+                # Progress update every 10 users
                 if user_id % 10 == 0:
-                    send_test_update(admin_chat_id, user_msg)
-                    
-            except Exception as e:
-                test_results['errors'].append(f"User {user_id} failed completely: {str(e)}")
-                send_test_update(admin_chat_id, f"❌ User {user_id} failed: {str(e)}")
-    
-    except Exception as e:
-        test_results['errors'].append(f"Load test crashed: {str(e)}")
-        send_test_update(admin_chat_id, f"💥 TEST CRASHED: {str(e)}")
-    
-    finally:
-        # Generate final report
-        duration = time.time() - test_results['start_time']
+                    bot.send_message(
+                        admin_chat_id,
+                        f"🔹 Processed {user_id}/100 users\n"
+                        f"✅ {active_users} active\n"
+                        f"🎯 {predictions} predictions\n"
+                        f"📡 {live_requests} live requests",
+                        disable_notification=True
+                    )
+        
+        # Final report
+        duration = time.time() - test_start
         report = (
-            "🏁 LOAD TEST COMPLETE\n\n"
-            f"⏱ Duration: {duration:.2f}s\n"
-            f"👥 Users simulated: {test_results['total_users']}\n"
-            f"🎯 Predictions: {test_results['predictions']}\n"
-            f"📡 Live requests: {test_results['live_requests']}\n"
-            f"❌ Errors: {len(test_results['errors'])}\n\n"
+            f"🏁 <b>LOAD TEST COMPLETE</b>\n\n"
+            f"⏱ <b>Duration:</b> {duration:.2f}s\n"
+            f"👥 <b>Channel Members:</b> {len(channel_members)}/100\n"
+            f"🤝 <b>Referrals Created:</b> {referrals_created}\n"
+            f"🎯 <b>Active Users:</b> {active_users}\n\n"
+            f"<u>Database Impact</u>\n"
+            f"• Users: {active_users} rows\n"
+            f"• Referrals: {referrals_created} rows\n"
+            f"• Live Requests: {live_requests} rows\n\n"
+            f"Use /cleantest to remove test data"
         )
         
-        # Include sample errors if any
-        if test_results['errors']:
-            report += "🔧 Error Samples:\n"
-            for error in test_results['errors'][:3]:  # Show first 3 errors
-                report += f"• {error[:100]}{'...' if len(error) > 100 else ''}\n"
-            if len(test_results['errors']) > 3:
-                report += f"• ...and {len(test_results['errors'])-3} more\n"
+        bot.send_message(admin_chat_id, report, parse_mode="HTML")
         
-        send_test_update(admin_chat_id, report)
-        
-        return test_results
+    except Exception as e:
+        bot.send_message(admin_chat_id, f"💥 Test failed: {str(e)}")
+
+# ================= TELEGRAM COMMANDS =================
+
+
+
 
 
 
@@ -755,53 +773,49 @@ def get_progress_bar(current, total=1, max_width=10):
 
 @bot.message_handler(commands=['loadtest'])
 def handle_load_test(message):
-    """Admin command to run load test"""
-    user_status = get_user_status(message.chat.id)
-    
-    if not user_status['is_admin']:
-        bot.reply_to(message, "⛔ Unauthorized!")
+    """Admin command to start test"""
+    if not get_user_status(message.chat.id)['is_admin']:
+        bot.reply_to(message, "⛔ Admin only!")
         return
-    
-    bot.reply_to(message, "🚀 Starting fake load test...")
-    success = run_load_test()
-    
-    if success:
-        bot.reply_to(message, "✅ Fake load test completed successfully")
-    else:
-        bot.reply_to(message, "❌ Fake load test failed - check logs")
-
-
+        
+    Thread(target=run_realistic_load_test, args=(message.chat.id,)).start()
+    bot.reply_to(message, "🧪 Starting realistic load test...")
 
 @bot.message_handler(commands=['cleantest'])
-def handle_clean_test(message):
-    """Admin command to clean test data"""
-    user_status = get_user_status(message.chat.id)
-    
-    if not user_status['is_admin']:
-        bot.reply_to(message, "⛔ Unauthorized!")
+def clean_test_data(message):
+    """Remove all test data"""
+    if not get_user_status(message.chat.id)['is_admin']:
+        bot.reply_to(message, "⛔ Admin only!")
         return
-    
-    bot.reply_to(message, "🧹 Cleaning up test data...")
-    success = cleanup_test_data()
-    
-    if success:
-        bot.reply_to(message, "✅ Test data cleaned successfully")
-    else:
-        bot.reply_to(message, "❌ Cleanup failed - check logs")
-
-def cleanup_test_data():
-    """Clean up data created by load tests"""
+        
     try:
         with db_cursor() as cur:
-            cur.execute("DELETE FROM users WHERE username LIKE 'testuser%'")
+            cur.execute("DELETE FROM users WHERE user_id <= 100")
             cur.execute("DELETE FROM referrals WHERE referred_id <= 100")
             cur.execute("DELETE FROM live_requests WHERE user_id <= 100")
             cur.execute("DELETE FROM pending_referrals WHERE referred_id <= 100")
-        logger.info("Cleaned up test data")
-        return True
+            
+        # Clear caches
+        for user_id in range(1, 101):
+            membership_cache.pop(user_id, None)
+            referral_cache.pop(user_id, None)
+            
+        bot.reply_to(message, "🧹 All test data cleaned successfully")
     except Exception as e:
-        logger.error(f"Cleanup failed: {str(e)}")
-        return False
+        bot.reply_to(message, f"❌ Cleanup failed: {str(e)}")
+
+# ================= INTEGRATION HELPERS =================
+
+def override_membership_check(user_id):
+    """Temporarily bypass real channel checks"""
+    original_check = bot.get_chat_member
+    
+    def mock_check(*args, **kwargs):
+        if args[1] <= 100:  # Our test users
+            return type('Member', (), {'status': 'member'})
+        return original_check(*args, **kwargs)
+    
+    bot.get_chat_member = mock_check
 
 # ======= TEST ENDS HERE========
 
@@ -2140,6 +2154,9 @@ if __name__ == '__main__':
     logger.info("Starting bot...")
     init_db_pool()
     initialize_database()
+
+    #====rekove ===
+    override_membership_check()
     
     # Start pool monitoring thread
 
