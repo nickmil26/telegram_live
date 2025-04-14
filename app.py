@@ -26,42 +26,24 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-#!/usr/bin/env python3
-"""
-Telegram Bot Load Testing Script
-- Simulates 100 users with realistic channel joins and referrals
-- Creates actual database entries under proper conditions
-- Provides detailed Telegram updates
-"""
+# ================= MOCK TELEGRAM API =================
+class MockChatMember:
+    def __init__(self):
+        self.status = 'member'
 
-
-
-# ================= FAKE USER GENERATION =================
-
-class FakeChat:
-    def __init__(self, id):
-        self.id = id
-
-class FakeUser:
-    def __init__(self, user_id):
-        self.id = user_id
-        self.username = f'testuser{user_id}'
-        self.first_name = f'Test{user_id}'
-        self.last_name = 'User'
-
-class FakeMessage:
-    def __init__(self, user_id, text):
-        self.chat = FakeChat(user_id)
-        self.from_user = FakeUser(user_id)
-        self.text = text
-        self.message_id = random.randint(1000, 9999)
-
-class FakeCall:
-    def __init__(self, user_id, data):
-        self.message = FakeMessage(user_id, "dummy")
-        self.from_user = FakeUser(user_id)
-        self.data = data
-        self.id = random.randint(10000, 99999)
+class MockBot:
+    def get_chat_member(self, chat_id, user_id):
+        return MockChatMember()
+    
+    def send_message(self, chat_id, text, **kwargs):
+        print(f"Mock send_message to {chat_id}: {text[:50]}...")
+        return type('Message', (), {'message_id': random.randint(1000,9999)})
+    
+    def reply_to(self, message, text, **kwargs):
+        return self.send_message(message.chat.id, text)
+    
+    def edit_message_text(self, text, chat_id, message_id, **kwargs):
+        print(f"Mock edit: {text[:50]}...")
 
 
 
@@ -2000,24 +1982,27 @@ def pool_monitor():
             logger.error(f"Pool monitor error: {e}")
 
 
-#====testchunkto remove====
-
-def mock_membership_check():
-    #Bypass real Telegram API checks for test users"""
-    original_func = bot.get_chat_member
-    
-    def mock_func(chat_id, user_id, *args, **kwargs):
-        if isinstance(user_id, int) and 1 <= user_id <= 100:  # Test user range
-            return type('Member', (), {'status': 'member'})
-        return original_func(chat_id, user_id, *args, **kwargs)
-    
-    bot.get_chat_member = mock_func
-
-
-# ===== LOAD TEST FUNCTIONS =====
-def run_safe_load_test(admin_chat_id):
-    """Main test function"""
+# ================= SAFE LOAD TEST =================
+def run_completely_mocked_test(admin_chat_id):
+    """100% mocked test with no real API calls"""
     try:
+        # Create test bot instance
+        test_bot = MockBot()
+        
+        # Store original bot functions
+        original_bot = {
+            'get_chat_member': bot.get_chat_member,
+            'send_message': bot.send_message,
+            'reply_to': bot.reply_to,
+            'edit_message_text': bot.edit_message_text
+        }
+        
+        # Mock all bot methods
+        bot.get_chat_member = test_bot.get_chat_member
+        bot.send_message = test_bot.send_message
+        bot.reply_to = test_bot.reply_to
+        bot.edit_message_text = test_bot.edit_message_text
+        
         test_results = {
             'users': 0,
             'predictions': 0,
@@ -2025,7 +2010,8 @@ def run_safe_load_test(admin_chat_id):
             'start_time': time.time()
         }
         
-        bot.send_message(admin_chat_id, "🧪 Starting SAFE load test...")
+        # Send real message to admin before mocking
+        bot.send_message(admin_chat_id, "🧪 Starting COMPLETELY MOCKED load test...")
         
         for user_id in range(1, 101):
             test_results['users'] += 1
@@ -2046,40 +2032,42 @@ def run_safe_load_test(admin_chat_id):
                 request_live_prediction(live_call)
                 test_results['live_requests'] += 1
             
-            # Progress updates
+            # Progress update
             if user_id % 10 == 0:
-                bot.send_message(
-                    admin_chat_id,
-                    f"🔹 Progress: {user_id}/100\n"
-                    f"🎯 Predictions: {test_results['predictions']}\n"
-                    f"📡 Live Requests: {test_results['live_requests']}",
-                    disable_notification=True
-                )
+                print(f"Processed {user_id}/100 users")  # Console log
         
-        # Final report
+        # Restore original bot methods
+        for name, func in original_bot.items():
+            setattr(bot, name, func)
+        
+        # Send final report
         duration = time.time() - test_results['start_time']
         bot.send_message(
             admin_chat_id,
-            f"🏁 <b>TEST COMPLETE</b>\n\n"
-            f"⏱ Duration: {duration:.2f}s\n"
-            f"👥 Users: {test_results['users']}\n"
-            f"🎯 Predictions: {test_results['predictions']}\n"
-            f"📡 Live Requests: {test_results['live_requests']}",
+            f"🏁 <b>MOCK TEST COMPLETE</b>\n\n"
+            f"• Users: {test_results['users']}\n"
+            f"• Predictions: {test_results['predictions']}\n"
+            f"• Live Requests: {test_results['live_requests']}\n"
+            f"• Duration: {duration:.2f}s\n\n"
+            f"<i>Zero real API calls made</i>",
             parse_mode="HTML"
         )
     
     except Exception as e:
+        # Ensure we restore bot methods even if test fails
+        for name, func in original_bot.items():
+            setattr(bot, name, func)
         bot.send_message(admin_chat_id, f"💥 Test failed: {str(e)}")
 
-@bot.message_handler(commands=['loadtest'])
-def handle_load_test(message):
-    """Command handler"""
+@bot.message_handler(commands=['mocktest'])
+def handle_mock_test(message):
+    """New command for 100% mocked testing"""
     if not get_user_status(message.chat.id)['is_admin']:
         bot.reply_to(message, "⛔ Admin only!")
         return
     
-    Thread(target=run_safe_load_test, args=(message.chat.id,)).start()
-    bot.reply_to(message, "🚀 Starting load test...")
+    Thread(target=run_completely_mocked_test, args=(message.chat.id,)).start()
+    bot.reply_to(message, "🔮 Starting 100% mocked load test...")
 
 # ================= MAIN EXECUTION =================
 if __name__ == '__main__':
@@ -2087,8 +2075,6 @@ if __name__ == '__main__':
     init_db_pool()
     initialize_database()
 
-    #====rekove ===
-    mock_membership_check()
     
     # Start pool monitoring thread
 
