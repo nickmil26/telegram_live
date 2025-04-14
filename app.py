@@ -28,7 +28,6 @@ from urllib3.util.retry import Retry
 
 # ================= MOCK TELEGRAM API =================
 
-bot = telebot.TeleBot(BOT_TOKEN)  # Your existing line
 
 # ================= TEST CLASS DEFINITIONS =================
 class FakeChat:
