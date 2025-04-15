@@ -210,19 +210,25 @@ def db_connection():
     with pool_lock:
         try:
             conn = db_pool.getconn()
-            conn_id = id(conn)  # Get unique identifier for the connection
+            conn_id = id(conn)
             
             # Track when connection was taken from pool
             with tracker_lock:
-                connection_tracker[conn_id] = time.time()
+                connection_tracker[conn_id] = {
+                    'time': time.time(),
+                    'stack': traceback.format_stack()  # Store call stack for debugging
+                }
             
             # Validate connection is still alive
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                raise Exception("Connection failed validation check")
                 
             yield conn
             
-        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+        except Exception as e:
             logger.error(f"Connection failed: {e}")
             if conn:  # Ensure bad connection is discarded
                 try:
@@ -232,11 +238,6 @@ def db_connection():
                 db_pool.putconn(conn, close=True)
                 with tracker_lock:
                     connection_tracker.pop(conn_id, None)
-            # Attempt to reinitialize pool
-            init_db_pool()
-            raise
-        except Exception as e:
-            logger.error(f"Database connection error: {e}")
             raise
         finally:
             if conn:
@@ -246,9 +247,18 @@ def db_connection():
                         conn.rollback()
                     except:
                         pass
-                    db_pool.putconn(conn)
+                    
+                    # Only return if still in tracker (not already closed)
                     with tracker_lock:
-                        connection_tracker.pop(conn_id, None)
+                        if conn_id in connection_tracker:
+                            db_pool.putconn(conn)
+                            connection_tracker.pop(conn_id, None)
+                        else:
+                            # Connection was already closed or returned
+                            try:
+                                conn.close()
+                            except:
+                                pass
                 except Exception as e:
                     logger.error(f"Error returning connection: {e}")
                     try:
@@ -300,44 +310,59 @@ def maintain_pool():
     with pool_lock:
         try:
             now = time.time()
-            idle_threshold = now - 3600  # 1 hour idle
-            old_threshold = now - 86400  # 24 hours old
+            idle_threshold = now - 300  # 5 minutes idle
+            old_threshold = now - 3600  # 1 hour old
             
+            # First check for leaked connections
             with tracker_lock:
-                # Get connection IDs and their last used times
-                conn_status = {
-                    id(conn): connection_tracker.get(id(conn), 0)
-                    for conn in list(db_pool._pool)
-                }
+                leaked_conns = [
+                    conn_id for conn_id, info in connection_tracker.items()
+                    if info['time'] < now - 3600  # 1 hour old
+                ]
+                
+                if leaked_conns:
+                    logger.warning(f"Found {len(leaked_conns)} leaked connections")
+                    for conn_id in leaked_conns:
+                        connection_tracker.pop(conn_id, None)
             
+            # Now clean up pool
             for conn in list(db_pool._pool):
                 conn_id = id(conn)
-                last_used = conn_status.get(conn_id, 0)
                 
                 # Close and remove idle connections
-                if last_used < idle_threshold:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                except:
+                    # Connection is bad, remove it
                     db_pool._pool.remove(conn)
-                    conn.close()
-                    with tracker_lock:
-                        connection_tracker.pop(conn_id, None)
-                    logger.info("Closed idle connection")
-                
-                # Recycle old connections even if recently used
-                elif last_used < old_threshold:
-                    db_pool._pool.remove(conn)
-                    conn.close()
-                    with tracker_lock:
-                        connection_tracker.pop(conn_id, None)
-                    logger.info("Recycled old connection")
-                    # Add a new connection to maintain pool size
                     try:
-                        new_conn = db_pool._create_connection()
-                        db_pool._pool.append(new_conn)
-                    except Exception as e:
-                        logger.error(f"Error creating replacement connection: {e}")
-                        
+                        conn.close()
+                    except:
+                        pass
+                    continue
+                
+                # Recycle old connections
+                try:
+                    conn_age = now - psycopg2.extensions.get_connection_parameter(conn, 'timestamp')
+                    if conn_age > old_threshold:
+                        db_pool._pool.remove(conn)
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                        # Add a new connection to maintain pool size
+                        try:
+                            new_conn = db_pool._create_connection()
+                            db_pool._pool.append(new_conn)
+                        except Exception as e:
+                            logger.error(f"Error creating replacement connection: {e}")
+                except:
+                    pass
+                    
         except Exception as e:
             logger.error(f"Pool maintenance error: {e}")
+
 
 def check_pool_health():
     """Verify pool is healthy"""
@@ -1953,6 +1978,19 @@ def pool_monitor():
         except Exception as e:
             logger.error(f"Pool monitor error: {e}")
 
+
+#=====Poolstatus=======
+
+@app.route('/pool-status')
+   def pool_status():
+       with tracker_lock:
+           active = len(connection_tracker)
+       return jsonify({
+           'pool_size': len(db_pool._pool),
+           'active_connections': active,
+           'leaked_connections': [k for k,v in connection_tracker.items() 
+                                 if time.time() - v['time'] > 3600]
+       })
 
 
 
