@@ -24,6 +24,7 @@ from functools import wraps
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import traceback
 
 
 # ================= ENHANCED CACHE IMPLEMENTATION =================
