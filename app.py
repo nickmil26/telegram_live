@@ -1982,16 +1982,15 @@ def pool_monitor():
 #=====Poolstatus=======
 
 @app.route('/pool-status')
-   def pool_status():
-       with tracker_lock:
-           active = len(connection_tracker)
-       return jsonify({
-           'pool_size': len(db_pool._pool),
-           'active_connections': active,
-           'leaked_connections': [k for k,v in connection_tracker.items() 
-                                 if time.time() - v['time'] > 3600]
-       })
-
+def pool_status():
+    with tracker_lock:
+        active = len(connection_tracker)
+    return jsonify({
+        'pool_size': len(db_pool._pool),
+        'active_connections': active,
+        'leaked_connections': [k for k,v in connection_tracker.items() 
+                             if time.time() - v['time'] > 3600]
+    })
 
 
 # ================= MAIN EXECUTION =================
