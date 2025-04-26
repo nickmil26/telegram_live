@@ -113,7 +113,7 @@ logger = setup_logging()
 # ================= CONFIGURATION =================
 # Environment variables with defaults for local testing
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', 'testsub01')
+CHANNEL_USERNAME = os.getenv('CHANNEL_USERNAME', 'Aviatorsignalrudra')
 BOT_USERNAME = os.getenv('BOT_USERNAME')
 COOLDOWN_SECONDS = int(os.getenv('COOLDOWN_SECONDS', 120))
 PREDICTION_DELAY = int(os.getenv('PREDICTION_DELAY', 130))
