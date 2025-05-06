@@ -897,7 +897,7 @@ def handle_prediction(call):
         # Generate and send prediction
         future_time, pred, safe = generate_prediction()
         prediction_msg = (
-            f"{ROCKET} *LUCKY JET PREDICTION*\n"
+            f"{ROCKET} *1WIN AVIATOR PREDICTION*\n"
             "┏━━━━━━━━━━━━━\n"
             f"┠ {DIAMOND} 🕒 Time: {future_time}\n"
             f"┠ {DIAMOND} Coefficient: {pred}X {ROCKET}\n"
